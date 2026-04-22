@@ -2,18 +2,30 @@
 model.py — CLIP-based aesthetic scorer.
 
 AestheticScorer encodes outfit images and aesthetic text prompts into the
-shared CLIP embedding space, then computes cosine similarity to produce
-a 0-10 rating.
+shared CLIP embedding space, then uses within-image z-score normalization
+to produce 0-10 ratings.
 
-Scoring intuition
------------------
-CLIP cosine similarities between a fashion photo and a matching style
-description typically fall in [0.20, 0.38].  We linearly map this range
-onto [0, 10] and clamp the result, giving:
+Scoring approach
+----------------
+CLIP text embeddings for different aesthetics are highly similar to each
+other (cosine sim ~0.75) because they cluster in a narrow cone of the
+embedding space.  Raw similarities therefore lack dynamic range — e.g. all
+aesthetics for a given outfit might fall in [0.44, 0.65].
 
-    score 0   → similarity ≤ 0.18  (completely unrelated)
-    score 5   → similarity ≈ 0.28  (moderate match)
-    score 10  → similarity ≥ 0.38  (strong match)
+To produce meaningful 0-10 scores we use **within-image z-score scoring**:
+
+1. Compute the raw cosine similarity between the outfit and every aesthetic.
+2. For that image, compute the mean and std across all aesthetics.
+3. Each aesthetic's score = 5 + (sim - mean) / std × Z_SCALE
+   clamped to [0, 10].
+
+This means:
+  • The average-matching aesthetic → ~5 / 10
+  • An aesthetic 1 std above average → ~5 + Z_SCALE
+  • Z_SCALE = 2.0 → ±2.5 std maps to the full 0-10 range
+
+When scoring against a *single* aesthetic, we still compute all prototypes
+internally so the image-specific mean/std are accurate.
 """
 
 import os
@@ -23,9 +35,9 @@ from PIL import Image
 import torch
 from transformers import CLIPProcessor, CLIPModel
 
-# Calibration: map cosine-sim range to [0, 10]
-_SIM_LOW  = 0.18   # floor  → score 0
-_SIM_HIGH = 0.38   # ceiling → score 10
+# Controls how much score spread within-image z-scores produce.
+# z=+2.5 → score 10,  z=-2.5 → score 0  (each std ≈ 2 points)
+_Z_SCALE = 2.0
 
 
 class AestheticScorer:
@@ -169,43 +181,29 @@ class AestheticScorer:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def similarity_to_score(
-        similarity: float,
-        low: float = _SIM_LOW,
-        high: float = _SIM_HIGH,
-    ) -> float:
-        """Map a cosine similarity in [low, high] to a 0-10 score."""
-        raw = (similarity - low) / (high - low) * 10.0
-        return float(max(0.0, min(10.0, raw)))
-
-    def score_image(
-        self,
-        image: Image.Image,
-        aesthetic_name: str,
-        prototype: np.ndarray,
-    ) -> dict:
+    def _zscore_scores(
+        similarities: dict[str, float],
+        z_scale: float = _Z_SCALE,
+    ) -> dict[str, float]:
         """
-        Rate an outfit image against one aesthetic prototype.
+        Convert a {aesthetic: raw_cosine_similarity} dict to {aesthetic: score}
+        using within-image z-score normalization.
 
-        Returns
-        -------
-        dict with keys:
-            aesthetic   – name of the target aesthetic
-            similarity  – raw cosine similarity (float in ~[0, 1])
-            score       – 0-10 rating (float)
-            label       – qualitative label string
+        score = 5 + (sim - mean_sim) / std_sim × z_scale,  clamped [0, 10].
+
+        If std_sim is near zero (all aesthetics match equally), everything
+        returns 5.0.
         """
-        img_emb = self.encode_image(image)
-        similarity = float(np.dot(img_emb, prototype))
-        score = self.similarity_to_score(similarity)
-        label = _score_label(score)
-
-        return {
-            "aesthetic": aesthetic_name,
-            "similarity": round(similarity, 4),
-            "score": round(score, 2),
-            "label": label,
-        }
+        vals = list(similarities.values())
+        mean_s = float(np.mean(vals))
+        std_s = float(np.std(vals))
+        if std_s < 1e-6:
+            return {k: 5.0 for k in similarities}
+        scores = {}
+        for k, s in similarities.items():
+            z = (s - mean_s) / std_s
+            scores[k] = float(max(0.0, min(10.0, 5.0 + z * z_scale)))
+        return scores
 
     def rank_aesthetics(
         self,
@@ -213,22 +211,58 @@ class AestheticScorer:
         prototypes: dict[str, np.ndarray],
     ) -> list[dict]:
         """
-        Score an image against every aesthetic prototype and return results
-        sorted by score descending.
+        Score an image against every aesthetic prototype.
+
+        Scores are within-image z-score normalised so the spread across
+        aesthetics is meaningful regardless of absolute similarity levels.
+
+        Returns a list of dicts sorted by score descending, each with:
+            aesthetic   – aesthetic key
+            similarity  – raw cosine similarity
+            score       – 0-10 z-score-normalised rating
+            label       – qualitative label string
         """
         img_emb = self.encode_image(image)
-        results = []
-        for name, proto in prototypes.items():
-            sim = float(np.dot(img_emb, proto))
-            results.append(
-                {
-                    "aesthetic": name,
-                    "similarity": round(sim, 4),
-                    "score": round(self.similarity_to_score(sim), 2),
-                    "label": _score_label(self.similarity_to_score(sim)),
-                }
-            )
+        raw_sims = {name: float(np.dot(img_emb, proto))
+                    for name, proto in prototypes.items()}
+        scores = self._zscore_scores(raw_sims)
+
+        results = [
+            {
+                "aesthetic": name,
+                "similarity": round(raw_sims[name], 4),
+                "score": round(scores[name], 2),
+                "label": _score_label(scores[name]),
+            }
+            for name in raw_sims
+        ]
         return sorted(results, key=lambda r: r["score"], reverse=True)
+
+    def score_image(
+        self,
+        image: Image.Image,
+        aesthetic_name: str,
+        prototypes: dict[str, np.ndarray],
+    ) -> dict:
+        """
+        Rate an outfit image against a specific aesthetic.
+
+        Internally ranks all aesthetics so the z-score is calibrated
+        against the full prototype set.
+
+        Returns
+        -------
+        dict with keys:
+            aesthetic   – name of the target aesthetic
+            similarity  – raw cosine similarity
+            score       – 0-10 z-score-normalised rating
+            label       – qualitative label string
+        """
+        ranked = self.rank_aesthetics(image, prototypes)
+        for r in ranked:
+            if r["aesthetic"] == aesthetic_name:
+                return r
+        raise ValueError(f"Aesthetic '{aesthetic_name}' not found in prototypes.")
 
 
 # ------------------------------------------------------------------

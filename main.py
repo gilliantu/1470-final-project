@@ -57,14 +57,16 @@ def print_result(result: dict, show_bar: bool = True) -> None:
 
 def print_ranking(ranked: list[dict]) -> None:
     print()
-    print("  ┌─ Aesthetic Ranking ──────────────────────────────────┐")
+    print("  ┌─ Aesthetic Ranking ────────────────────────────────────────────┐")
     for i, r in enumerate(ranked, 1):
         display = AESTHETIC_NAMES.get(r["aesthetic"], r["aesthetic"])
         bar_len = int(r["score"] / 10 * 25)
         bar = "█" * bar_len + "░" * (25 - bar_len)
         medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f" {i}.")
-        print(f"  │ {medal} {display:<18} {bar} {r['score']:>5.1f}/10")
-    print("  └──────────────────────────────────────────────────────┘")
+        print(
+            f"  │ {medal} {display:<18} {bar} {r['score']:>5.1f}/10  sim={r['similarity']:.4f}"
+        )
+    print("  └────────────────────────────────────────────────────────────────┘")
     best = ranked[0]
     best_display = AESTHETIC_NAMES.get(best["aesthetic"], best["aesthetic"])
     print(f"\n  Best match: {best_display} ({best['score']:.1f}/10 — {best['label']})\n")
@@ -146,9 +148,8 @@ Examples:
     print(f"Size : {image.size[0]}×{image.size[1]} px")
 
     if args.aesthetic:
-        # Single aesthetic scoring
-        proto = prototypes[args.aesthetic]
-        result = scorer.score_image(image, args.aesthetic, proto)
+        # Single aesthetic scoring (all prototypes passed for z-score calibration)
+        result = scorer.score_image(image, args.aesthetic, prototypes)
         print_result(result)
     else:
         # Rank all aesthetics
