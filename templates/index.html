@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Outfit Aesthetic Scorer</title>
+  <style>
+    /* ── Reset & Base ───────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Helvetica Neue', Arial, sans-serif;
+      background: #f5f0eb;
+      color: #2b2b2b;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 2rem 1rem 4rem;
+    }
+
+    /* ── Header ─────────────────────────────────────────────── */
+    header {
+      text-align: center;
+      margin-bottom: 2.5rem;
+    }
+    header h1 {
+      font-size: 2.2rem;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      color: #1a1a1a;
+    }
+    header p {
+      margin-top: 0.4rem;
+      color: #666;
+      font-size: 0.95rem;
+    }
+
+    /* ── Card ───────────────────────────────────────────────── */
+    .card {
+      background: #fff;
+      border-radius: 16px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+      padding: 2rem;
+      width: 100%;
+      max-width: 680px;
+    }
+
+    /* ── Upload zone ────────────────────────────────────────── */
+    .upload-zone {
+      border: 2px dashed #ccc;
+      border-radius: 12px;
+      padding: 2.5rem 1rem;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+      position: relative;
+    }
+    .upload-zone:hover, .upload-zone.dragover {
+      border-color: #b5838d;
+      background: #fdf5f6;
+    }
+    .upload-zone input[type="file"] {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      cursor: pointer;
+      width: 100%;
+      height: 100%;
+    }
+    .upload-icon { font-size: 2.5rem; margin-bottom: 0.5rem; }
+    .upload-zone p { color: #888; font-size: 0.9rem; margin-top: 0.3rem; }
+
+    /* ── Preview ────────────────────────────────────────────── */
+    #preview-wrap {
+      display: none;
+      margin-top: 1.2rem;
+      text-align: center;
+    }
+    #preview-wrap img {
+      max-height: 280px;
+      max-width: 100%;
+      border-radius: 10px;
+      object-fit: contain;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.12);
+    }
+    #remove-btn {
+      display: block;
+      margin: 0.6rem auto 0;
+      background: none;
+      border: none;
+      color: #999;
+      font-size: 0.8rem;
+      cursor: pointer;
+      text-decoration: underline;
+    }
+    #remove-btn:hover { color: #e05;  }
+
+    /* ── Controls ───────────────────────────────────────────── */
+    .controls {
+      margin-top: 1.4rem;
+      display: flex;
+      gap: 0.8rem;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .controls label {
+      font-size: 0.85rem;
+      color: #555;
+      white-space: nowrap;
+    }
+    .controls select {
+      flex: 1;
+      min-width: 160px;
+      padding: 0.55rem 0.8rem;
+      border: 1.5px solid #ddd;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      background: #fff;
+      color: #2b2b2b;
+      cursor: pointer;
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23888' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 0.8rem center;
+      padding-right: 2rem;
+    }
+    .controls select:focus { outline: none; border-color: #b5838d; }
+
+    #score-btn {
+      padding: 0.6rem 1.6rem;
+      background: #b5838d;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s, transform 0.1s;
+      white-space: nowrap;
+    }
+    #score-btn:hover  { background: #9d6b74; }
+    #score-btn:active { transform: scale(0.97); }
+    #score-btn:disabled { background: #ccc; cursor: not-allowed; }
+
+    /* ── Spinner ────────────────────────────────────────────── */
+    #spinner {
+      display: none;
+      text-align: center;
+      padding: 1.5rem 0;
+      color: #888;
+      font-size: 0.9rem;
+    }
+    .dot-flashing {
+      display: inline-flex;
+      gap: 6px;
+      vertical-align: middle;
+      margin-right: 6px;
+    }
+    .dot-flashing span {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: #b5838d;
+      animation: blink 1.2s infinite;
+    }
+    .dot-flashing span:nth-child(2) { animation-delay: 0.2s; }
+    .dot-flashing span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes blink { 0%,80%,100% { opacity:0.2; } 40% { opacity:1; } }
+
+    /* ── Results ────────────────────────────────────────────── */
+    #results { display: none; margin-top: 1.8rem; }
+
+    .result-header {
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #aaa;
+      margin-bottom: 1rem;
+    }
+
+    /* Single result hero */
+    .hero-result {
+      text-align: center;
+      padding: 1.4rem 0 0.8rem;
+    }
+    .hero-aesthetic {
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: #b5838d;
+    }
+    .hero-label {
+      font-size: 0.85rem;
+      color: #888;
+      margin-top: 0.2rem;
+    }
+    .hero-score {
+      font-size: 3.8rem;
+      font-weight: 800;
+      color: #1a1a1a;
+      line-height: 1;
+      margin: 0.5rem 0 0.2rem;
+    }
+    .hero-score span { font-size: 1.4rem; font-weight: 400; color: #888; }
+    .hero-bar-wrap {
+      margin: 0.8rem auto 0;
+      max-width: 360px;
+      height: 12px;
+      background: #eee;
+      border-radius: 99px;
+      overflow: hidden;
+    }
+    .hero-bar-fill {
+      height: 100%;
+      border-radius: 99px;
+      background: linear-gradient(90deg, #e8b4b8, #b5838d);
+      transition: width 0.6s cubic-bezier(.22,.68,0,1.2);
+    }
+    .hero-sim {
+      font-size: 0.78rem;
+      color: #bbb;
+      margin-top: 0.5rem;
+    }
+
+    /* All-aesthetics table */
+    .aes-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.55rem;
+    }
+    .aes-row {
+      display: grid;
+      grid-template-columns: 140px 1fr 60px 90px;
+      align-items: center;
+      gap: 0.6rem;
+      padding: 0.45rem 0.5rem;
+      border-radius: 8px;
+      transition: background 0.15s;
+    }
+    .aes-row:hover { background: #faf7f5; }
+    .aes-row.top-row {
+      background: #fdf0f2;
+      font-weight: 600;
+    }
+    .aes-name {
+      font-size: 0.88rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .bar-track {
+      height: 8px;
+      background: #eee;
+      border-radius: 99px;
+      overflow: hidden;
+    }
+    .bar-fill {
+      height: 100%;
+      border-radius: 99px;
+      background: linear-gradient(90deg, #e8b4b8, #b5838d);
+      transition: width 0.5s ease;
+    }
+    .aes-score {
+      font-size: 0.88rem;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .aes-sim {
+      font-size: 0.75rem;
+      color: #bbb;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+    .rank-badge {
+      display: inline-block;
+      font-size: 0.72rem;
+      padding: 1px 5px;
+      border-radius: 4px;
+      background: #b5838d;
+      color: #fff;
+      margin-left: 4px;
+      vertical-align: middle;
+    }
+
+    /* ── Error ──────────────────────────────────────────────── */
+    #error-msg {
+      display: none;
+      margin-top: 1rem;
+      padding: 0.7rem 1rem;
+      background: #fff0f0;
+      border: 1px solid #fcc;
+      border-radius: 8px;
+      color: #c00;
+      font-size: 0.85rem;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Outfit Aesthetic Scorer</h1>
+  <p>Upload a photo &amp; see how it matches different fashion aesthetics</p>
+</header>
+
+<div class="card">
+
+  <!-- Upload -->
+  <div class="upload-zone" id="upload-zone">
+    <input type="file" id="file-input" accept="image/*" />
+    <div class="upload-icon">👗</div>
+    <strong>Drop an outfit photo here</strong>
+    <p>or click to browse &nbsp;·&nbsp; JPG, PNG, WEBP</p>
+  </div>
+
+  <!-- Preview -->
+  <div id="preview-wrap">
+    <img id="preview-img" src="" alt="outfit preview" />
+    <button id="remove-btn">remove image</button>
+  </div>
+
+  <!-- Controls -->
+  <div class="controls">
+    <label for="aesthetic-select">Aesthetic:</label>
+    <select id="aesthetic-select">
+      <option value="">— rank all —</option>
+      {% for a in aesthetics %}
+      <option value="{{ a.key }}">{{ a.label }}</option>
+      {% endfor %}
+    </select>
+    <button id="score-btn" disabled>Score</button>
+  </div>
+
+  <!-- Spinner -->
+  <div id="spinner">
+    <div class="dot-flashing"><span></span><span></span><span></span></div>
+    Scoring outfit…
+  </div>
+
+  <!-- Error -->
+  <div id="error-msg"></div>
+
+  <!-- Results -->
+  <div id="results"></div>
+
+</div>
+
+<script>
+  const fileInput   = document.getElementById('file-input');
+  const uploadZone  = document.getElementById('upload-zone');
+  const previewWrap = document.getElementById('preview-wrap');
+  const previewImg  = document.getElementById('preview-img');
+  const removeBtn   = document.getElementById('remove-btn');
+  const scoreBtn    = document.getElementById('score-btn');
+  const spinner     = document.getElementById('spinner');
+  const resultsDiv  = document.getElementById('results');
+  const errorDiv    = document.getElementById('error-msg');
+  const select      = document.getElementById('aesthetic-select');
+
+  let currentFile = null;
+
+  // ── Drag-and-drop ────────────────────────────────────────────
+  uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('dragover'); });
+  uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragover'));
+  uploadZone.addEventListener('drop', e => {
+    e.preventDefault();
+    uploadZone.classList.remove('dragover');
+    const file = e.dataTransfer.files[0];
+    if (file && file.type.startsWith('image/')) setFile(file);
+  });
+
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files[0]) setFile(fileInput.files[0]);
+  });
+
+  function setFile(file) {
+    currentFile = file;
+    const reader = new FileReader();
+    reader.onload = e => {
+      previewImg.src = e.target.result;
+      previewWrap.style.display = 'block';
+      uploadZone.style.display  = 'none';
+      scoreBtn.disabled = false;
+      clearResults();
+    };
+    reader.readAsDataURL(file);
+  }
+
+  removeBtn.addEventListener('click', () => {
+    currentFile = null;
+    previewImg.src = '';
+    previewWrap.style.display = 'none';
+    uploadZone.style.display  = '';
+    scoreBtn.disabled = true;
+    fileInput.value = '';
+    clearResults();
+  });
+
+  // ── Score ────────────────────────────────────────────────────
+  scoreBtn.addEventListener('click', async () => {
+    if (!currentFile) return;
+
+    setLoading(true);
+    clearResults();
+
+    const formData = new FormData();
+    formData.append('image', currentFile);
+    const aes = select.value;
+    if (aes) formData.append('aesthetic', aes);
+
+    try {
+      const resp = await fetch('/score', { method: 'POST', body: formData });
+      const data = await resp.json();
+      if (!resp.ok || data.error) throw new Error(data.error || 'Server error');
+      renderResults(data);
+    } catch (err) {
+      showError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  });
+
+  // ── Render ───────────────────────────────────────────────────
+  function renderResults(data) {
+    resultsDiv.style.display = 'block';
+
+    if (data.mode === 'single') {
+      const r = data.result;
+      const pct = (r.score / 10 * 100).toFixed(1);
+      resultsDiv.innerHTML = `
+        <div class="result-header">Result</div>
+        <div class="hero-result">
+          <div class="hero-aesthetic">${r.label_display}</div>
+          <div class="hero-label">${r.label}</div>
+          <div class="hero-score">${r.score.toFixed(1)}<span> / 10</span></div>
+          <div class="hero-bar-wrap">
+            <div class="hero-bar-fill" style="width:0%" data-pct="${pct}"></div>
+          </div>
+          <div class="hero-sim">cosine similarity: ${r.similarity.toFixed(4)}</div>
+        </div>
+        <div style="margin-top:1.4rem">
+          <div class="result-header">All aesthetics</div>
+          ${buildAesList(data.all, r.aesthetic)}
+        </div>`;
+    } else {
+      resultsDiv.innerHTML = `
+        <div class="result-header">Aesthetic ranking</div>
+        ${buildAesList(data.all, data.all[0].aesthetic)}`;
+    }
+
+    // Animate bars
+    requestAnimationFrame(() => {
+      document.querySelectorAll('[data-pct]').forEach(el => {
+        el.style.width = el.dataset.pct + '%';
+      });
+      document.querySelectorAll('[data-bar]').forEach(el => {
+        el.style.width = el.dataset.bar + '%';
+      });
+    });
+  }
+
+  function buildAesList(all, topAesthetic) {
+    const rows = all.map((r, i) => {
+      const pct = (r.score / 10 * 100).toFixed(1);
+      const isTop = r.aesthetic === topAesthetic;
+      const badge = i === 0 ? '<span class="rank-badge">#1</span>' : '';
+      return `
+        <div class="aes-row ${isTop ? 'top-row' : ''}">
+          <div class="aes-name">${r.label_display}${badge}</div>
+          <div class="bar-track">
+            <div class="bar-fill" style="width:0%" data-bar="${pct}"></div>
+          </div>
+          <div class="aes-score">${r.score.toFixed(1)}<span style="color:#bbb;font-size:.75rem">/10</span></div>
+          <div class="aes-sim">sim ${r.similarity.toFixed(4)}</div>
+        </div>`;
+    }).join('');
+    return `<div class="aes-list">${rows}</div>`;
+  }
+
+  // ── Helpers ──────────────────────────────────────────────────
+  function setLoading(on) {
+    spinner.style.display   = on ? 'block' : 'none';
+    scoreBtn.disabled       = on;
+  }
+
+  function clearResults() {
+    resultsDiv.style.display = 'none';
+    resultsDiv.innerHTML     = '';
+    errorDiv.style.display   = 'none';
+    errorDiv.textContent     = '';
+  }
+
+  function showError(msg) {
+    errorDiv.textContent    = '⚠ ' + msg;
+    errorDiv.style.display  = 'block';
+  }
+</script>
+</body>
+</html>
