@@ -5,7 +5,7 @@ Usage examples
 --------------
     # Rate an outfit against a specific aesthetic
     python main.py --image outfit.jpg --aesthetic streetwear
-
+ 
     # Let the model find the best matching aesthetic automatically
     python main.py --image outfit.jpg
 
