@@ -3,10 +3,15 @@
 Introduction:
 
 Capstone students: No
+
 Are you implementing an existing paper/project or solving something new?: Implementing an existing paper [1470]
+
 Team name: JAG
+
 Member cs logins: gtu3, jshou, ajacob39
+
 Project category: Transformers + CNN + Generative Model
+
 Project idea:
 
 Our project will take a photo of an outfit and rate how closely it matches a chosen aesthetic like streetwear, minimalist, or casual by giving a score from 1 to 10, where a higher score means it fits the aesthetic better. Using the fashion.json dataset, we will train a model to recognize patterns like clothing type, color, and overall vibe that define each aesthetic, and then compare a new outfit to those learned patterns to produce a similarity score. To evaluate the model, we will split the data into training and validation sets and check if it gives higher scores to outfits that clearly match an aesthetic and lower scores to ones that do not.
