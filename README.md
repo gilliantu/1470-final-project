@@ -20,7 +20,7 @@ https://www.kaggle.com/datasets/pypiahmad/shop-the-look-dataset/data?select=fash
 Challenges: What has been the hardest part of the project you've encountered so far?
 Figuring out a weighting system for cosine similarity and scaling. At first our model was scoring all 10 aesthetics as 10/10 but once we rescaled the cosine similarity, we were able to assign a score out of 10 for each aesthetic.
 
-Insights: Are there any concrete results you can show at this point?
+Insights: Are there any m concrete results you can show at this point?
 We currently have a prototype app that can be locally hosted where you submit an image of an outfit and it will return a ranking of how closely your outfit matches each of the 10 aesthetics.
 
 How is your model performing compared with expectations?
