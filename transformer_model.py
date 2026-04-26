@@ -43,6 +43,25 @@ def sigmoid(x):
     return 1.0 / (1.0 + np.exp(-np.clip(x, -500, 500)))
 
 
+# ── Positional Encoding ───────────────────────────────────────────────────────
+
+def sinusoidal_encoding(n_positions: int, d_model: int) -> np.ndarray:
+    """
+    Sinusoidal positional encoding (Vaswani et al. 2017).
+
+    PE(pos, 2i)   = sin(pos / 10000^(2i/d_model))
+    PE(pos, 2i+1) = cos(pos / 10000^(2i/d_model))
+
+    Returns float32 [n_positions, d_model] with values in [-1, 1].
+    """
+    pos   = np.arange(n_positions, dtype=np.float32)[:, None]   # [N, 1]
+    dims  = np.arange(d_model,     dtype=np.float32)[None, :]   # [1, D]
+    freqs = np.power(10000.0, (2 * (dims // 2)) / d_model)
+    angles = pos / freqs                                         # [N, D]
+    enc = np.where(dims % 2 == 0, np.sin(angles), np.cos(angles))
+    return enc.astype(np.float32)
+
+
 # ── Layer Normalization ───────────────────────────────────────────────────────
 
 def layer_norm_fwd(x, gamma, beta, eps=1e-5):
@@ -201,6 +220,9 @@ class AestheticTransformer:
 
     Input:  patch_tokens [B, 50, 768]  (from frozen CLIP vision backbone)
     Output: logits [B, num_aesthetics]  (apply sigmoid×10 for [0,10] scores)
+
+    Defaults: 6 encoder layers, d_model=256, 8 heads, d_ff=1024 (4× d_model).
+    Positional encoding: sinusoidal (no CLIP dependency).
     """
 
     CLIP_DIM  = 768
@@ -211,8 +233,8 @@ class AestheticTransformer:
         num_aesthetics: int = 10,
         d_model: int = 256,
         num_heads: int = 8,
-        num_layers: int = 4,
-        d_ff: int = 512,
+        num_layers: int = 6,
+        d_ff: int = 1024,
         seed: int = 0,
     ):
         self.num_aesthetics = num_aesthetics
@@ -238,8 +260,8 @@ class AestheticTransformer:
         p = {}
         p['proj_W']  = self._xavier(H, d)
         p['proj_b']  = np.zeros(d, dtype=np.float32)
-        p['pos_emb'] = (self._rng.normal(0, 0.02, (1, self.N_PATCHES, d))
-                        .astype(np.float32))
+        enc = sinusoidal_encoding(self.N_PATCHES, d)               # [50, d]
+        p['pos_emb'] = (enc / (enc.std() + 1e-8) * 0.02)[None].astype(np.float32)
         for i in range(self.num_layers):
             pf = f'l{i}_'
             p[pf+'norm1_gamma'] = np.ones(d,   dtype=np.float32)

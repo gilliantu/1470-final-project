@@ -5,7 +5,7 @@ Usage examples
 --------------
     # Rate an outfit against a specific aesthetic
     python main.py --image outfit.jpg --aesthetic streetwear
- 
+
     # Let the model find the best matching aesthetic automatically
     python main.py --image outfit.jpg
 
@@ -17,7 +17,7 @@ Usage examples
 
 Workflow
 --------
-1. Run `python train.py` once to build prototype embeddings (data/prototypes.npz).
+1. Run `python train.py` then `python train_transformer.py` to build the model.
 2. Then run `python main.py --image <path> --aesthetic <name>` to score.
 """
 
@@ -27,24 +27,22 @@ import sys
 
 from PIL import Image
 
-from model import AestheticScorer, load_prototypes
+from transformer_model import AestheticScorerV2
 from preprocess import download_image
 from aesthetics import AESTHETICS, AESTHETIC_NAMES
 
-PROTO_PATH = os.path.join(os.path.dirname(__file__), "data", "prototypes.npz")
+CKPT_PATH = os.path.join(os.path.dirname(__file__), "data", "transformer.npz")
 
 
 def print_result(result: dict, show_bar: bool = True) -> None:
     display = AESTHETIC_NAMES.get(result["aesthetic"], result["aesthetic"])
     score = result["score"]
-    sim = result["similarity"]
     label = result["label"]
 
     print()
     print("╔══════════════════════════════════════════════╗")
     print(f"║  Aesthetic : {display:<32}║")
     print(f"║  Score     : {score:<5.1f} / 10  ({label:<16})║")
-    print(f"║  Similarity: {sim:<32.4f}║")
     print("╚══════════════════════════════════════════════╝")
 
     if show_bar:
@@ -57,16 +55,14 @@ def print_result(result: dict, show_bar: bool = True) -> None:
 
 def print_ranking(ranked: list[dict]) -> None:
     print()
-    print("  ┌─ Aesthetic Ranking ────────────────────────────────────────────┐")
+    print("  ┌─ Aesthetic Ranking ──────────────────────────────────────┐")
     for i, r in enumerate(ranked, 1):
         display = AESTHETIC_NAMES.get(r["aesthetic"], r["aesthetic"])
         bar_len = int(r["score"] / 10 * 25)
         bar = "█" * bar_len + "░" * (25 - bar_len)
         medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f" {i}.")
-        print(
-            f"  │ {medal} {display:<18} {bar} {r['score']:>5.1f}/10  sim={r['similarity']:.4f}"
-        )
-    print("  └────────────────────────────────────────────────────────────────┘")
+        print(f"  │ {medal} {display:<18} {bar} {r['score']:>5.1f}/10")
+    print("  └──────────────────────────────────────────────────────────┘")
     best = ranked[0]
     best_display = AESTHETIC_NAMES.get(best["aesthetic"], best["aesthetic"])
     print(f"\n  Best match: {best_display} ({best['score']:.1f}/10 — {best['label']})\n")
@@ -85,7 +81,7 @@ Examples:
         """,
     )
     parser.add_argument("--image", type=str, help="Path to a local outfit image.")
-    parser.add_argument("--url", type=str, help="URL of an outfit image to download.")
+    parser.add_argument("--url",   type=str, help="URL of an outfit image to download.")
     parser.add_argument(
         "--aesthetic", type=str, default=None,
         help="Target aesthetic key (see --list). Omit to rank all aesthetics.",
@@ -95,8 +91,8 @@ Examples:
         help="List all available aesthetics and exit.",
     )
     parser.add_argument(
-        "--prototypes", type=str, default=PROTO_PATH,
-        help=f"Path to prototypes .npz file (default {PROTO_PATH}).",
+        "--checkpoint", type=str, default=CKPT_PATH,
+        help=f"Path to trained transformer checkpoint (default {CKPT_PATH}).",
     )
     args = parser.parse_args()
 
@@ -104,9 +100,7 @@ Examples:
     if args.list:
         print("\nAvailable aesthetics:")
         for key, display in AESTHETIC_NAMES.items():
-            prompts = AESTHETICS[key]
             print(f"  {key:<20} → {display}")
-            print(f"    ({len(prompts)} reference prompts)")
         print()
         return
 
@@ -126,35 +120,34 @@ Examples:
         image = Image.open(args.image).convert("RGB")
         image_label = os.path.basename(args.image)
     else:
-        print(f"Downloading image from URL …")
+        print("Downloading image from URL …")
         image = download_image(args.url)
         if image is None:
             print("[ERROR] Could not download image. Check the URL and network.")
             sys.exit(1)
         image_label = args.url.split("/")[-1] or "downloaded_image"
 
-    # ── Load prototypes ────────────────────────────────────────────────
-    if not os.path.exists(args.prototypes):
-        print(f"[ERROR] Prototype file not found: {args.prototypes}")
-        print("Run `python train.py` first to build aesthetic prototypes.")
+    # ── Load model ─────────────────────────────────────────────────────
+    if not os.path.exists(args.checkpoint):
+        print(f"[ERROR] Checkpoint not found: {args.checkpoint}")
+        print("Run `python train.py` then `python train_transformer.py` first.")
         sys.exit(1)
 
-    prototypes = load_prototypes(args.prototypes)
-
-    # ── Score ──────────────────────────────────────────────────────────
-    scorer = AestheticScorer()
+    scorer = AestheticScorerV2(
+        checkpoint_path=args.checkpoint,
+        aesthetic_names=list(AESTHETIC_NAMES.keys()),
+    )
 
     print(f"\nImage: {image_label}")
     print(f"Size : {image.size[0]}×{image.size[1]} px")
 
+    # ── Score ──────────────────────────────────────────────────────────
     if args.aesthetic:
-        # Single aesthetic scoring (all prototypes passed for z-score calibration)
-        result = scorer.score_image(image, args.aesthetic, prototypes)
+        result = scorer.score_image(image, args.aesthetic)
         print_result(result)
     else:
-        # Rank all aesthetics
         print("\nRanking against all aesthetics …")
-        ranked = scorer.rank_aesthetics(image, prototypes)
+        ranked = scorer.rank_aesthetics(image)
         print_ranking(ranked)
 
 
