@@ -179,19 +179,27 @@ class AestheticTransformer(nn.Module):
     """
     Encoder transformer for aesthetic classification.
 
-    Input:  CLIP patch tokens [B, 50, 768]  (frozen CLIP vision backbone output)
-    Output: logits [B, num_aesthetics]       (sigmoid × 10 → scores in [0, 10])
+    Inputs:
+      patch_tokens [B, 50, 768]  — raw CLIP vision backbone patch tokens
+      clip_emb     [B, 512]      — L2-normalised CLIP projected embedding
+                                   (same feature the prototype scorer uses)
+    Output: logits [B, num_aesthetics]
+            Apply z-score normalisation at inference to get [0, 10] scores.
 
     Architecture:
       1. Linear projection 768 → d_model
       2. Sinusoidal positional encoding (fixed buffer, from student code)
       3. num_layers × TransformerBlock  (pre-norm, GELU, configurable heads)
-      4. Final LayerNorm
-      5. CLS token → two-layer MLP → aesthetic scores
+      4. Final LayerNorm on CLS token
+      5. clip_bridge fuses the projected CLIP embedding into the CLS output
+         so the model sees both spatial patch detail AND the global semantic
+         signal already aligned with the text prototype space
+      6. Two-layer MLP head → aesthetic logits
     """
 
-    CLIP_DIM  = 768
-    N_PATCHES = 50   # 1 CLS + 7×7 patches for ViT-B/32
+    CLIP_DIM   = 768
+    CLIP_PROJ  = 512   # projected CLIP embedding dimension
+    N_PATCHES  = 50    # 1 CLS + 7×7 patches for ViT-B/32
 
     def __init__(
         self,
@@ -203,11 +211,14 @@ class AestheticTransformer(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.input_proj = nn.Linear(self.CLIP_DIM, d_model)
+        self.input_proj  = nn.Linear(self.CLIP_DIM,  d_model)
+        # Projects the 512-dim CLIP global embedding into d_model space
+        # and adds it to the CLS token — gives the model direct access to
+        # the same feature the original prototype scorer uses
+        self.clip_bridge = nn.Linear(self.CLIP_PROJ, d_model, bias=False)
 
-        # Sinusoidal PE: fixed (not trained), stored as a buffer
-        pe = positional_encoding(self.N_PATCHES, d_model)   # [50, d_model]
-        self.register_buffer("pos_enc", pe.unsqueeze(0))    # [1, 50, d_model]
+        pe = positional_encoding(self.N_PATCHES, d_model)
+        self.register_buffer("pos_enc", pe.unsqueeze(0))   # [1, 50, d_model]
 
         self.blocks = nn.ModuleList([
             TransformerBlock(d_model, num_heads, dropout) for _ in range(num_layers)
@@ -230,16 +241,24 @@ class AestheticTransformer(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
-    def forward(self, patch_tokens: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        patch_tokens: torch.Tensor,
+        clip_emb: torch.Tensor,
+    ) -> torch.Tensor:
         """
-        patch_tokens: [B, 50, 768]  CLIP vision_model.last_hidden_state
+        patch_tokens: [B, 50, 768]
+        clip_emb:     [B, 512]  L2-normalised projected CLIP embedding
         Returns logits: [B, num_aesthetics]
         """
         x = self.input_proj(patch_tokens) + self.pos_enc   # [B, 50, d_model]
         for block in self.blocks:
             x = block(x)
-        cls = self.norm(x)[:, 0]    # CLS token after final norm  [B, d_model]
-        return self.head(cls)       # [B, num_aesthetics]
+        cls = self.norm(x)[:, 0]                           # [B, d_model]
+        # Fuse global CLIP embedding — residual addition so the transformer
+        # can refine the CLIP signal rather than learn it from scratch
+        cls = cls + self.clip_bridge(clip_emb)
+        return self.head(cls)                              # [B, num_aesthetics]
 
 
 # ── Inference wrapper ─────────────────────────────────────────────────────────
@@ -296,22 +315,49 @@ class AestheticScorerV2:
 
     # ── Feature extraction (only CLIP usage) ─────────────────────────────
 
-    def extract_patch_tokens(self, images: list[Image.Image]) -> torch.Tensor:
-        """Return [B, 50, 768] patch tokens from CLIP's frozen vision backbone."""
+    def extract_features(
+        self, images: list[Image.Image]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Extract both feature types from frozen CLIP in one forward pass.
+
+        Returns:
+          patch_tokens: [B, 50, 768]  raw vision backbone hidden states
+          clip_emb:     [B, 512]      L2-normalised projected embedding
+                                      (same feature used by the prototype scorer)
+        """
         inputs = self.processor(images=images, return_tensors="pt").to(self.device)
         with torch.no_grad():
-            out = self.clip.vision_model(pixel_values=inputs["pixel_values"])
-        return out.last_hidden_state   # [B, 50, 768]
+            out      = self.clip.vision_model(pixel_values=inputs["pixel_values"])
+            clip_emb = self.clip.visual_projection(out.pooler_output)   # [B, 512]
+            clip_emb = clip_emb / clip_emb.norm(dim=-1, keepdim=True)  # L2 normalise
+        return out.last_hidden_state, clip_emb
+
+    # kept for backward-compat with train_transformer.py cache extraction
+    def extract_patch_tokens(self, images: list[Image.Image]) -> torch.Tensor:
+        return self.extract_features(images)[0]
 
     # ── Scoring ───────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _zscore(raw: np.ndarray) -> np.ndarray:
+        """
+        Within-image z-score normalisation → [0, 10].
+        Identical to the original AestheticScorer._zscore_scores so rankings
+        are directly comparable.
+        """
+        mean = raw.mean(axis=-1, keepdims=True)
+        std  = raw.std(axis=-1,  keepdims=True)
+        std  = np.where(std < 1e-6, 1.0, std)
+        return np.clip(5.0 + (raw - mean) / std * 2.0, 0.0, 10.0)
 
     @torch.no_grad()
     def score_images(self, images: list[Image.Image]) -> np.ndarray:
         """Return aesthetic scores in [0, 10], shape [N, num_aesthetics]."""
-        tokens = self.extract_patch_tokens(images)
+        tokens, clip_emb = self.extract_features(images)
         self.transformer.eval()
-        logits = self.transformer(tokens)
-        return (torch.sigmoid(logits) * 10.0).cpu().numpy()
+        logits = self.transformer(tokens, clip_emb).cpu().numpy()
+        return self._zscore(logits)
 
     def rank_aesthetics(self, image: Image.Image) -> list[dict]:
         """Score one image; returns list sorted by score descending."""
