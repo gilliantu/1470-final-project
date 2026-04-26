@@ -1,232 +1,197 @@
 """
-transformer_model.py — Custom transformer for aesthetic scoring.
+transformer_model.py — Aesthetic transformer built on student_hw_model_transformer.py.
 
-All transformer components (attention, FFN, layer norm) are implemented
-from scratch in NumPy — no PyTorch, no Keras.
-PyTorch is used only to load the frozen CLIP feature extractor.
+Starting from the homework attention and block structure, improved with
+HuggingFace-style conventions:
 
-Architecture
-------------
-1. CLIP ViT-B/32 (frozen PyTorch) → 50 patch tokens × 768-dim
-2. NumPy transformer:
-   a. Linear projection 768 → d_model
-   b. Learned positional encoding
-   c. N × TransformerEncoderLayer (multi-head self-attention + FFN)
-   d. CLS token → MLP head → 10 aesthetic scores
-3. Training via manual backprop + Adam (all NumPy)
+  AttentionMatrix     — kept; added attention dropout
+  AttentionHead       — kept; removed is_self_attention (encoder-only, no causal mask)
+  MultiHeadedAttention— configurable num_heads (was hardcoded 3); nn.ModuleList for heads
+  TransformerBlock    — encoder-only (removed cross-attention); pre-LayerNorm;
+                        GELU instead of ReLU; separate residual dropout
+  positional_encoding — kept exactly from student code
+  AestheticTransformer— new: projects CLIP tokens → d_model, stacks encoder blocks,
+                        classifies from CLS token
+
+CLIP is used only in AestheticScorerV2.extract_patch_tokens (frozen, no gradients).
+The transformer itself has zero dependency on CLIP.
 """
 
-import os
 import math
+import os
+
 import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from PIL import Image
 from transformers import CLIPModel, CLIPProcessor
-import torch
 
 
-# ── Activations ───────────────────────────────────────────────────────────────
+# ── Attention (from student_hw_model_transformer.py) ─────────────────────────
 
-def softmax(x, axis=-1):
-    x = x - np.max(x, axis=axis, keepdims=True)
-    e = np.exp(x)
-    return e / np.sum(e, axis=axis, keepdims=True)
-
-def gelu(x):
-    return 0.5 * x * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * x ** 3)))
-
-def gelu_grad(x):
-    c = np.sqrt(2.0 / np.pi)
-    t = np.tanh(c * (x + 0.044715 * x ** 3))
-    return 0.5 * (1.0 + t) + 0.5 * x * (1.0 - t ** 2) * c * (1.0 + 3 * 0.044715 * x ** 2)
-
-def sigmoid(x):
-    return 1.0 / (1.0 + np.exp(-np.clip(x, -500, 500)))
-
-
-# ── Positional Encoding ───────────────────────────────────────────────────────
-
-def sinusoidal_encoding(n_positions: int, d_model: int) -> np.ndarray:
+class AttentionMatrix(nn.Module):
     """
-    Sinusoidal positional encoding (Vaswani et al. 2017).
+    Scaled dot-product attention weights.
 
-    PE(pos, 2i)   = sin(pos / 10000^(2i/d_model))
-    PE(pos, 2i+1) = cos(pos / 10000^(2i/d_model))
-
-    Returns float32 [n_positions, d_model] with values in [-1, 1].
+    Change from student code: added attention dropout (HuggingFace standard);
+    removed causal mask — encoder-only classification needs no autoregressive mask.
     """
-    pos   = np.arange(n_positions, dtype=np.float32)[:, None]   # [N, 1]
-    dims  = np.arange(d_model,     dtype=np.float32)[None, :]   # [1, D]
-    freqs = np.power(10000.0, (2 * (dims // 2)) / d_model)
-    angles = pos / freqs                                         # [N, D]
-    enc = np.where(dims % 2 == 0, np.sin(angles), np.cos(angles))
-    return enc.astype(np.float32)
+
+    def __init__(self, dropout: float = 0.1) -> None:
+        super().__init__()
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, K: torch.Tensor, Q: torch.Tensor) -> torch.Tensor:
+        """
+        K: [B x seq_keys    x d_k]
+        Q: [B x seq_queries x d_k]
+        Returns attention weights [B x seq_queries x seq_keys]
+        """
+        d_k    = K.size(-1)
+        scores = torch.bmm(Q, K.transpose(1, 2)) / math.sqrt(d_k)
+        return self.dropout(F.softmax(scores, dim=-1))
 
 
-# ── Layer Normalization ───────────────────────────────────────────────────────
-
-def layer_norm_fwd(x, gamma, beta, eps=1e-5):
-    """x: [..., D]. Returns (y, cache)."""
-    mean  = np.mean(x, axis=-1, keepdims=True)
-    var   = np.var(x,  axis=-1, keepdims=True)
-    x_hat = (x - mean) / np.sqrt(var + eps)
-    return gamma * x_hat + beta, (x_hat, var, gamma, eps)
-
-def layer_norm_bwd(dout, cache):
-    """Returns (dx, dgamma, dbeta)."""
-    x_hat, var, gamma, eps = cache
-    N = x_hat.shape[-1]
-    sum_axes = tuple(range(dout.ndim - 1))
-    dgamma = np.sum(dout * x_hat, axis=sum_axes)
-    dbeta  = np.sum(dout,         axis=sum_axes)
-    dx_hat = dout * gamma
-    std_inv = 1.0 / np.sqrt(var + eps)
-    dx = std_inv * (
-        dx_hat
-        - np.mean(dx_hat,          axis=-1, keepdims=True)
-        - x_hat * np.mean(dx_hat * x_hat, axis=-1, keepdims=True)
-    )
-    return dx, dgamma, dbeta
-
-
-# ── Scaled Dot-Product Attention ──────────────────────────────────────────────
-
-def sdp_attn_fwd(Q, K, V):
-    """Q/K/V: [B, H, N, d_k]. Returns (out, cache)."""
-    scale  = math.sqrt(Q.shape[-1])
-    scores = np.matmul(Q, K.transpose(0, 1, 3, 2)) / scale   # [B,H,N,N]
-    attn   = softmax(scores, axis=-1)
-    out    = np.matmul(attn, V)                                # [B,H,N,d_k]
-    return out, (Q, K, V, attn, scale)
-
-def sdp_attn_bwd(dout, cache):
-    """Returns (dQ, dK, dV)."""
-    Q, K, V, attn, scale = cache
-    dV      = np.matmul(attn.transpose(0, 1, 3, 2), dout)
-    d_attn  = np.matmul(dout, V.transpose(0, 1, 3, 2))
-    d_scores = attn * (d_attn - np.sum(d_attn * attn, axis=-1, keepdims=True))
-    d_scores /= scale
-    dQ = np.matmul(d_scores,                       K)
-    dK = np.matmul(d_scores.transpose(0, 1, 3, 2), Q)
-    return dQ, dK, dV
-
-
-# ── Multi-Head Attention ──────────────────────────────────────────────────────
-
-def mha_fwd(x, W_q, W_k, W_v, W_o, num_heads):
-    """x: [B, N, D]. Returns (out, cache)."""
-    B, N, D = x.shape
-    d_k = D // num_heads
-    Q = (x @ W_q).reshape(B, N, num_heads, d_k).transpose(0, 2, 1, 3)
-    K = (x @ W_k).reshape(B, N, num_heads, d_k).transpose(0, 2, 1, 3)
-    V = (x @ W_v).reshape(B, N, num_heads, d_k).transpose(0, 2, 1, 3)
-    attn_out, sdp_cache = sdp_attn_fwd(Q, K, V)
-    merged = attn_out.transpose(0, 2, 1, 3).reshape(B, N, D)
-    out    = merged @ W_o
-    return out, (x, merged, sdp_cache, W_q, W_k, W_v, W_o, num_heads)
-
-def mha_bwd(dout, cache):
-    """Returns (dx, dW_q, dW_k, dW_v, dW_o)."""
-    x, merged, sdp_cache, W_q, W_k, W_v, W_o, num_heads = cache
-    B, N, D = x.shape
-    d_k = D // num_heads
-    dW_o    = merged.reshape(-1, D).T @ dout.reshape(-1, D)
-    d_merged = dout @ W_o.T
-    d_attn_out = d_merged.reshape(B, N, num_heads, d_k).transpose(0, 2, 1, 3)
-    dQ_h, dK_h, dV_h = sdp_attn_bwd(d_attn_out, sdp_cache)
-    dQ = dQ_h.transpose(0, 2, 1, 3).reshape(B, N, D)
-    dK = dK_h.transpose(0, 2, 1, 3).reshape(B, N, D)
-    dV = dV_h.transpose(0, 2, 1, 3).reshape(B, N, D)
-    dW_q = x.reshape(-1, D).T @ dQ.reshape(-1, D)
-    dW_k = x.reshape(-1, D).T @ dK.reshape(-1, D)
-    dW_v = x.reshape(-1, D).T @ dV.reshape(-1, D)
-    dx   = dQ @ W_q.T + dK @ W_k.T + dV @ W_v.T
-    return dx, dW_q, dW_k, dW_v, dW_o
-
-
-# ── Feed-Forward Network ──────────────────────────────────────────────────────
-
-def ff_fwd(x, W1, b1, W2, b2):
-    """x: [B, N, D] → [B, N, D]."""
-    h     = x @ W1 + b1
-    h_act = gelu(h)
-    out   = h_act @ W2 + b2
-    return out, (x, h, h_act, W1, W2)
-
-def ff_bwd(dout, cache):
-    """Returns (dx, dW1, db1, dW2, db2)."""
-    x, h, h_act, W1, W2 = cache
-    dW2   = h_act.reshape(-1, h_act.shape[-1]).T @ dout.reshape(-1, dout.shape[-1])
-    db2   = dout.sum(axis=tuple(range(dout.ndim - 1)))
-    dh_act = dout @ W2.T
-    dh    = dh_act * gelu_grad(h)
-    dW1   = x.reshape(-1, x.shape[-1]).T @ dh.reshape(-1, h.shape[-1])
-    db1   = dh.sum(axis=tuple(range(dh.ndim - 1)))
-    dx    = dh @ W1.T
-    return dx, dW1, db1, dW2, db2
-
-
-# ── Transformer Encoder Layer ─────────────────────────────────────────────────
-
-def encoder_layer_fwd(x, p, num_heads):
+class AttentionHead(nn.Module):
     """
-    Pre-norm: x → LN → MHA → residual → LN → FFN → residual.
-    p: dict with norm/attention/FFN weight keys.
-    Returns (x2, cache).
+    Single attention head.
+
+    Change from student code: removed is_self_attention / use_mask parameter
+    since the encoder never needs a causal mask.
     """
-    # Sublayer 1: self-attention
-    xn1, ln1_cache = layer_norm_fwd(x, p['norm1_gamma'], p['norm1_beta'])
-    attn_out, mha_cache = mha_fwd(xn1, p['W_q'], p['W_k'], p['W_v'], p['W_o'], num_heads)
-    x1 = x + attn_out
 
-    # Sublayer 2: FFN
-    xn2, ln2_cache = layer_norm_fwd(x1, p['norm2_gamma'], p['norm2_beta'])
-    ff_out, ff_cache = ff_fwd(xn2, p['W1'], p['b1'], p['W2'], p['b2'])
-    x2 = x1 + ff_out
+    def __init__(self, input_size: int, output_size: int, dropout: float = 0.1) -> None:
+        super().__init__()
+        self.key      = nn.Linear(input_size, output_size, bias=False)
+        self.value    = nn.Linear(input_size, output_size, bias=False)
+        self.query    = nn.Linear(input_size, output_size, bias=False)
+        self.attention = AttentionMatrix(dropout)
 
-    return x2, (ln1_cache, mha_cache, ln2_cache, ff_cache)
-
-def encoder_layer_bwd(dout, cache):
-    """Returns (dx, grads_dict)."""
-    ln1_cache, mha_cache, ln2_cache, ff_cache = cache
-
-    # FFN residual: x2 = x1 + ff_out
-    d_x1      = dout.copy()
-    d_ff_out  = dout
-    d_xn2, dW1, db1, dW2, db2 = ff_bwd(d_ff_out, ff_cache)
-    d_x1_ln2, dg2, dbeta2     = layer_norm_bwd(d_xn2, ln2_cache)
-    d_x1 += d_x1_ln2
-
-    # Attention residual: x1 = x + attn_out
-    dx          = d_x1.copy()
-    d_attn_out  = d_x1
-    d_xn1, d_Wq, d_Wk, d_Wv, d_Wo = mha_bwd(d_attn_out, mha_cache)
-    d_x_ln1, dg1, dbeta1           = layer_norm_bwd(d_xn1, ln1_cache)
-    dx += d_x_ln1
-
-    grads = {
-        'norm1_gamma': dg1,   'norm1_beta': dbeta1,
-        'norm2_gamma': dg2,   'norm2_beta': dbeta2,
-        'W_q': d_Wq, 'W_k': d_Wk, 'W_v': d_Wv, 'W_o': d_Wo,
-        'W1': dW1, 'b1': db1, 'W2': dW2, 'b2': db2,
-    }
-    return dx, grads
+    def forward(
+        self,
+        inputs_for_keys:    torch.Tensor,
+        inputs_for_values:  torch.Tensor,
+        inputs_for_queries: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        inputs: [B x seq x input_size]
+        Returns [B x seq_queries x output_size]
+        """
+        K = self.key(inputs_for_keys)
+        V = self.value(inputs_for_values)
+        Q = self.query(inputs_for_queries)
+        return torch.bmm(self.attention(K, Q), V)
 
 
-# ── Aesthetic Transformer (NumPy) ─────────────────────────────────────────────
-
-class AestheticTransformer:
+class MultiHeadedAttention(nn.Module):
     """
-    Transformer for aesthetic scoring — implemented entirely in NumPy.
+    Multi-head attention with configurable number of heads.
 
-    Input:  patch_tokens [B, 50, 768]  (from frozen CLIP vision backbone)
-    Output: logits [B, num_aesthetics]  (apply sigmoid×10 for [0,10] scores)
+    Changes from student code:
+      - num_heads is a parameter (was hardcoded to 3)
+      - Uses nn.ModuleList so all heads are tracked by the optimizer
+      - Output projection renamed to out_proj (was linear)
+    """
 
-    Defaults: 6 encoder layers, d_model=256, 8 heads, d_ff=1024 (4× d_model).
-    Positional encoding: sinusoidal (no CLIP dependency).
+    def __init__(self, emb_sz: int, num_heads: int = 8, dropout: float = 0.1) -> None:
+        super().__init__()
+        assert emb_sz % num_heads == 0, "emb_sz must be divisible by num_heads"
+        head_dim   = emb_sz // num_heads
+        self.heads = nn.ModuleList([
+            AttentionHead(emb_sz, head_dim, dropout) for _ in range(num_heads)
+        ])
+        self.out_proj = nn.Linear(emb_sz, emb_sz)
+        self.dropout  = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        inputs_for_keys:    torch.Tensor,
+        inputs_for_values:  torch.Tensor,
+        inputs_for_queries: torch.Tensor,
+    ) -> torch.Tensor:
+        """Returns [B x seq_queries x emb_sz]."""
+        combined = torch.cat(
+            [h(inputs_for_keys, inputs_for_values, inputs_for_queries) for h in self.heads],
+            dim=-1,
+        )
+        return self.dropout(self.out_proj(combined))
+
+
+# ── Transformer block (from student code, improved) ──────────────────────────
+
+class TransformerBlock(nn.Module):
+    """
+    Encoder-only transformer block.
+
+    Changes from student code:
+      - Removed cross-attention sublayer — encoders for classification don't need it
+      - Pre-LayerNorm (norm before sublayer, not after) — HuggingFace ViT/GPT-2 style,
+        more stable gradients in deep stacks
+      - GELU activation instead of ReLU — HuggingFace standard
+      - FFN width is 4× emb_sz (standard transformer ratio)
+    """
+
+    def __init__(self, emb_sz: int, num_heads: int = 8, dropout: float = 0.1) -> None:
+        super().__init__()
+        self.norm1     = nn.LayerNorm(emb_sz)
+        self.norm2     = nn.LayerNorm(emb_sz)
+        self.attention = MultiHeadedAttention(emb_sz, num_heads, dropout)
+        self.feed_forward = nn.Sequential(
+            nn.Linear(emb_sz, emb_sz * 4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(emb_sz * 4, emb_sz),
+        )
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: [B x seq_len x emb_sz]"""
+        # Pre-norm self-attention + residual
+        normed = self.norm1(x)
+        x = x + self.dropout1(self.attention(normed, normed, normed))
+        # Pre-norm FFN + residual
+        x = x + self.dropout2(self.feed_forward(self.norm2(x)))
+        return x
+
+
+# ── Positional encoding (kept exactly from student_hw_model_transformer.py) ──
+
+def positional_encoding(length: int, depth: int) -> torch.Tensor:
+    """
+    Sinusoidal positional encoding (from student_hw_model_transformer.py).
+
+    :param length: number of positions (sequence length)
+    :param depth:  embedding dimension
+    :return:       torch.FloatTensor [length x depth]
+    """
+    depth     = depth // 2
+    positions = torch.arange(length, dtype=torch.float32).unsqueeze(1)
+    depths    = torch.arange(depth,  dtype=torch.float32).unsqueeze(0) / depth
+    angle_rads = positions / (10000 ** depths)
+    return torch.cat([torch.sin(angle_rads), torch.cos(angle_rads)], dim=1)
+
+
+# ── Full aesthetic transformer ────────────────────────────────────────────────
+
+class AestheticTransformer(nn.Module):
+    """
+    Encoder transformer for aesthetic classification.
+
+    Input:  CLIP patch tokens [B, 50, 768]  (frozen CLIP vision backbone output)
+    Output: logits [B, num_aesthetics]       (sigmoid × 10 → scores in [0, 10])
+
+    Architecture:
+      1. Linear projection 768 → d_model
+      2. Sinusoidal positional encoding (fixed buffer, from student code)
+      3. num_layers × TransformerBlock  (pre-norm, GELU, configurable heads)
+      4. Final LayerNorm
+      5. CLS token → two-layer MLP → aesthetic scores
     """
 
     CLIP_DIM  = 768
-    N_PATCHES = 50
+    N_PATCHES = 50   # 1 CLS + 7×7 patches for ViT-B/32
 
     def __init__(
         self,
@@ -234,193 +199,66 @@ class AestheticTransformer:
         d_model: int = 256,
         num_heads: int = 8,
         num_layers: int = 6,
-        d_ff: int = 1024,
-        seed: int = 0,
-    ):
-        self.num_aesthetics = num_aesthetics
-        self.d_model        = d_model
-        self.num_heads      = num_heads
-        self.num_layers     = num_layers
-        self.d_ff           = d_ff
-        self._rng           = np.random.default_rng(seed)
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
 
-        self.params = self._init_params()
-        self.m = {k: np.zeros_like(v) for k, v in self.params.items()}
-        self.v = {k: np.zeros_like(v) for k, v in self.params.items()}
-        self.t = 0
+        self.input_proj = nn.Linear(self.CLIP_DIM, d_model)
 
-    # ── Parameter initialisation ──────────────────────────────────────────
+        # Sinusoidal PE: fixed (not trained), stored as a buffer
+        pe = positional_encoding(self.N_PATCHES, d_model)   # [50, d_model]
+        self.register_buffer("pos_enc", pe.unsqueeze(0))    # [1, 50, d_model]
 
-    def _xavier(self, fan_in, fan_out):
-        std = math.sqrt(2.0 / (fan_in + fan_out))
-        return self._rng.normal(0.0, std, (fan_in, fan_out)).astype(np.float32)
+        self.blocks = nn.ModuleList([
+            TransformerBlock(d_model, num_heads, dropout) for _ in range(num_layers)
+        ])
+        self.norm = nn.LayerNorm(d_model)
 
-    def _init_params(self):
-        d, dff, H = self.d_model, self.d_ff, self.CLIP_DIM
-        p = {}
-        p['proj_W']  = self._xavier(H, d)
-        p['proj_b']  = np.zeros(d, dtype=np.float32)
-        enc = sinusoidal_encoding(self.N_PATCHES, d)               # [50, d]
-        p['pos_emb'] = (enc / (enc.std() + 1e-8) * 0.02)[None].astype(np.float32)
-        for i in range(self.num_layers):
-            pf = f'l{i}_'
-            p[pf+'norm1_gamma'] = np.ones(d,   dtype=np.float32)
-            p[pf+'norm1_beta']  = np.zeros(d,  dtype=np.float32)
-            p[pf+'norm2_gamma'] = np.ones(d,   dtype=np.float32)
-            p[pf+'norm2_beta']  = np.zeros(d,  dtype=np.float32)
-            p[pf+'W_q'] = self._xavier(d, d)
-            p[pf+'W_k'] = self._xavier(d, d)
-            p[pf+'W_v'] = self._xavier(d, d)
-            p[pf+'W_o'] = self._xavier(d, d)
-            p[pf+'W1']  = self._xavier(d, dff)
-            p[pf+'b1']  = np.zeros(dff, dtype=np.float32)
-            p[pf+'W2']  = self._xavier(dff, d)
-            p[pf+'b2']  = np.zeros(d,   dtype=np.float32)
-        p['final_gamma'] = np.ones(d,  dtype=np.float32)
-        p['final_beta']  = np.zeros(d, dtype=np.float32)
-        p['head_W1'] = self._xavier(d, d // 2)
-        p['head_b1'] = np.zeros(d // 2,              dtype=np.float32)
-        p['head_W2'] = self._xavier(d // 2, self.num_aesthetics)
-        p['head_b2'] = np.zeros(self.num_aesthetics, dtype=np.float32)
-        return p
-
-    def _layer_params(self, i):
-        pf = f'l{i}_'
-        p  = self.params
-        return {k: p[pf+k] for k in
-                ('norm1_gamma','norm1_beta','norm2_gamma','norm2_beta',
-                 'W_q','W_k','W_v','W_o','W1','b1','W2','b2')}
-
-    # ── Forward pass ──────────────────────────────────────────────────────
-
-    def forward(self, patch_tokens: np.ndarray):
-        """
-        patch_tokens: float32 [B, 50, 768]
-        Returns (logits [B, num_aesthetics], cache)
-        """
-        p = self.params
-
-        # 1. Input projection
-        x = patch_tokens @ p['proj_W'] + p['proj_b']   # [B, 50, d]
-
-        # 2. Positional encoding
-        x = x + p['pos_emb']
-
-        # 3. Encoder layers
-        layer_caches = []
-        for i in range(self.num_layers):
-            x, lc = encoder_layer_fwd(x, self._layer_params(i), self.num_heads)
-            layer_caches.append(lc)
-
-        # 4. CLS token + final norm
-        cls      = x[:, 0, :]                                          # [B, d]
-        cls_norm, final_ln_cache = layer_norm_fwd(
-            cls, p['final_gamma'], p['final_beta']
+        self.head = nn.Sequential(
+            nn.Linear(d_model, d_model // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model // 2, num_aesthetics),
         )
 
-        # 5. MLP head
-        h     = cls_norm @ p['head_W1'] + p['head_b1']                # [B, d//2]
-        h_act = gelu(h)
-        logits = h_act @ p['head_W2'] + p['head_b2']                  # [B, num_aes]
+        self._init_weights()
 
-        cache = (patch_tokens, x, layer_caches, final_ln_cache, cls_norm, h, h_act)
-        return logits, cache
+    def _init_weights(self) -> None:
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
 
-    # ── Backward pass ─────────────────────────────────────────────────────
-
-    def backward(self, d_logits: np.ndarray, cache) -> dict:
+    def forward(self, patch_tokens: torch.Tensor) -> torch.Tensor:
         """
-        d_logits: [B, num_aesthetics]  gradient of loss w.r.t. logits
-        Returns grads dict (same keys as self.params).
+        patch_tokens: [B, 50, 768]  CLIP vision_model.last_hidden_state
+        Returns logits: [B, num_aesthetics]
         """
-        patch_tokens, x_final, layer_caches, final_ln_cache, cls_norm, h, h_act = cache
-        p = self.params
-        g = {}
-
-        # 5. MLP head backward
-        g['head_b2'] = d_logits.sum(axis=0)
-        g['head_W2'] = h_act.T @ d_logits
-        d_h_act      = d_logits @ p['head_W2'].T
-        d_h          = d_h_act * gelu_grad(h)
-        g['head_b1'] = d_h.sum(axis=0)
-        g['head_W1'] = cls_norm.T @ d_h
-        d_cls_norm   = d_h @ p['head_W1'].T
-
-        # 4. Final layer norm backward
-        d_cls, g['final_gamma'], g['final_beta'] = layer_norm_bwd(d_cls_norm, final_ln_cache)
-
-        # Gradient enters x_final at position 0 only (CLS token)
-        dx = np.zeros_like(x_final)
-        dx[:, 0, :] = d_cls
-
-        # 3. Encoder layers backward (reverse order)
-        for i in range(self.num_layers - 1, -1, -1):
-            pf = f'l{i}_'
-            dx, layer_grads = encoder_layer_bwd(dx, layer_caches[i])
-            for k, v in layer_grads.items():
-                g[pf + k] = v
-
-        # 2. Positional encoding: gradient passes straight through
-        g['pos_emb'] = dx.sum(axis=0, keepdims=True)
-
-        # 1. Input projection backward
-        g['proj_b'] = dx.sum(axis=(0, 1))
-        g['proj_W'] = patch_tokens.reshape(-1, self.CLIP_DIM).T @ dx.reshape(-1, self.d_model)
-
-        return g
-
-    # ── Adam optimiser step ───────────────────────────────────────────────
-
-    def adam_step(self, grads: dict, lr=1e-4, beta1=0.9, beta2=0.999, eps=1e-8):
-        self.t += 1
-        for key in self.params:
-            grad = grads[key]
-            self.m[key] = beta1 * self.m[key] + (1 - beta1) * grad
-            self.v[key] = beta2 * self.v[key] + (1 - beta2) * grad ** 2
-            m_hat = self.m[key] / (1 - beta1 ** self.t)
-            v_hat = self.v[key] / (1 - beta2 ** self.t)
-            self.params[key] -= lr * m_hat / (np.sqrt(v_hat) + eps)
-
-    # ── Persistence ───────────────────────────────────────────────────────
-
-    def save(self, path: str, aesthetic_names: list | None = None):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        payload = dict(self.params)
-        if aesthetic_names:
-            payload['__names__'] = np.array(aesthetic_names)
-        np.savez(path, **payload)
-
-    def load(self, path: str) -> list | None:
-        data = np.load(path, allow_pickle=True)
-        for k in self.params:
-            if k in data:
-                self.params[k] = data[k].astype(np.float32)
-        # reset Adam state after loading
-        self.m = {k: np.zeros_like(v) for k, v in self.params.items()}
-        self.v = {k: np.zeros_like(v) for k, v in self.params.items()}
-        self.t = 0
-        if '__names__' in data:
-            return list(data['__names__'])
-        return None
+        x = self.input_proj(patch_tokens) + self.pos_enc   # [B, 50, d_model]
+        for block in self.blocks:
+            x = block(x)
+        cls = self.norm(x)[:, 0]    # CLS token after final norm  [B, d_model]
+        return self.head(cls)       # [B, num_aesthetics]
 
 
-# ── Inference wrapper (frozen CLIP + NumPy transformer) ───────────────────────
+# ── Inference wrapper ─────────────────────────────────────────────────────────
 
 def _score_label(score: float) -> str:
-    if score >= 8.5:  return "Perfect match"
-    if score >= 7.0:  return "Strong match"
-    if score >= 5.5:  return "Good match"
-    if score >= 4.0:  return "Moderate match"
-    if score >= 2.5:  return "Weak match"
+    if score >= 8.5: return "Perfect match"
+    if score >= 7.0: return "Strong match"
+    if score >= 5.5: return "Good match"
+    if score >= 4.0: return "Moderate match"
+    if score >= 2.5: return "Weak match"
     return "Little to no match"
 
 
 class AestheticScorerV2:
     """
-    Frozen CLIP feature extractor (PyTorch) + NumPy AestheticTransformer.
+    Frozen CLIP (feature extraction only) + trained AestheticTransformer.
 
-    Scores images against aesthetics using the trained transformer.
-    Drop-in complement to model.AestheticScorer.
+    CLIP is accessed exclusively in extract_patch_tokens.
+    The transformer has zero CLIP dependency.
     """
 
     def __init__(
@@ -428,11 +266,11 @@ class AestheticScorerV2:
         checkpoint_path: str | None = None,
         aesthetic_names: list[str] | None = None,
         device: str | None = None,
-    ):
+    ) -> None:
         if device is None:
-            if torch.cuda.is_available():      device = "cuda"
+            if torch.cuda.is_available():           device = "cuda"
             elif torch.backends.mps.is_available(): device = "mps"
-            else:                              device = "cpu"
+            else:                                   device = "cpu"
         self.device = device
 
         print(f"[AestheticScorerV2] Loading CLIP on {device} …")
@@ -442,29 +280,38 @@ class AestheticScorerV2:
         for p in self.clip.parameters():
             p.requires_grad = False
 
-        self.transformer = AestheticTransformer()
+        self.transformer = AestheticTransformer().to(device)
 
         if checkpoint_path and os.path.exists(checkpoint_path):
-            names = self.transformer.load(checkpoint_path)
-            self.aesthetic_names: list[str] = names or aesthetic_names or []
+            ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
+            self.transformer.load_state_dict(ckpt["model"])
+            self.aesthetic_names: list[str] = ckpt.get("aesthetic_names", aesthetic_names or [])
             print(f"[AestheticScorerV2] Checkpoint loaded from {checkpoint_path}")
         else:
             self.aesthetic_names = aesthetic_names or []
             if checkpoint_path:
                 print(f"[AestheticScorerV2] No checkpoint at {checkpoint_path}; random weights.")
 
-    def extract_patch_tokens(self, images: list[Image.Image]) -> np.ndarray:
-        """Return [B, 50, 768] float32 patch token array from CLIP vision backbone."""
+        self.transformer.eval()
+
+    # ── Feature extraction (only CLIP usage) ─────────────────────────────
+
+    def extract_patch_tokens(self, images: list[Image.Image]) -> torch.Tensor:
+        """Return [B, 50, 768] patch tokens from CLIP's frozen vision backbone."""
         inputs = self.processor(images=images, return_tensors="pt").to(self.device)
         with torch.no_grad():
             out = self.clip.vision_model(pixel_values=inputs["pixel_values"])
-        return out.last_hidden_state.cpu().numpy().astype(np.float32)
+        return out.last_hidden_state   # [B, 50, 768]
 
+    # ── Scoring ───────────────────────────────────────────────────────────
+
+    @torch.no_grad()
     def score_images(self, images: list[Image.Image]) -> np.ndarray:
         """Return aesthetic scores in [0, 10], shape [N, num_aesthetics]."""
         tokens = self.extract_patch_tokens(images)
-        logits, _ = self.transformer.forward(tokens)
-        return sigmoid(logits) * 10.0
+        self.transformer.eval()
+        logits = self.transformer(tokens)
+        return (torch.sigmoid(logits) * 10.0).cpu().numpy()
 
     def rank_aesthetics(self, image: Image.Image) -> list[dict]:
         """Score one image; returns list sorted by score descending."""

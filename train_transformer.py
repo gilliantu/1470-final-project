@@ -1,17 +1,17 @@
 """
-train_transformer.py — Train the NumPy AestheticTransformer.
+train_transformer.py — Train the AestheticTransformer.
 
 Steps
 -----
 1. Download N scene images from fashion.json.
-2. Generate soft labels (10 z-score aesthetic scores) using the existing
-   prototype-based AestheticScorer.
-3. Extract frozen CLIP patch tokens [N, 50, 768] (PyTorch, one-time pass).
-4. Train the NumPy AestheticTransformer with manual backprop + Adam.
-5. Save best checkpoint to data/transformer.npz.
+2. Generate soft labels using the prototype-based AestheticScorer
+   (10 z-score aesthetic scores per image, values in [0, 10]).
+3. Extract frozen CLIP patch tokens [N, 50, 768] (one-time pass).
+4. Train AestheticTransformer with MSE loss (sigmoid × 10 output).
+5. Save the best checkpoint to data/transformer.pt.
 
-Feature cache (data/feature_cache.npz) is written after the first run;
-use --use-cache to skip downloading and CLIP extraction on re-runs.
+Feature cache (data/feature_cache.npz) is written after the first run.
+Use --use-cache to skip downloading and CLIP extraction on re-runs.
 
 Usage
 -----
@@ -25,24 +25,40 @@ import os
 import random
 
 import numpy as np
+import torch
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, Dataset
 
 from aesthetics import AESTHETICS
 from model import AestheticScorer, load_prototypes
 from preprocess import batch_download, load_records, sample_random_scenes
-from transformer_model import AestheticScorerV2, AestheticTransformer, sigmoid
+from transformer_model import AestheticScorerV2, AestheticTransformer
 
 PROTO_PATH = os.path.join(os.path.dirname(__file__), "data", "prototypes.npz")
-CKPT_PATH  = os.path.join(os.path.dirname(__file__), "data", "transformer.npz")
+CKPT_PATH  = os.path.join(os.path.dirname(__file__), "data", "transformer.pt")
 CACHE_PATH = os.path.join(os.path.dirname(__file__), "data", "feature_cache.npz")
 
 
-# ── Data preparation ──────────────────────────────────────────────────────────
+# ── Dataset ───────────────────────────────────────────────────────────────────
 
-def generate_labels(scorer, prototypes, images, aesthetic_keys):
-    """
-    For each image compute the prototype z-score for all aesthetics.
-    Returns float32 [N, 10] array with values in [0, 10].
-    """
+class AestheticDataset(Dataset):
+    """(patch_tokens [50, 768], labels [10]) where labels are in [0, 10]."""
+
+    def __init__(self, tokens: np.ndarray, labels: np.ndarray) -> None:
+        self.tokens = torch.from_numpy(tokens).float()
+        self.labels = torch.from_numpy(labels).float()
+
+    def __len__(self) -> int:
+        return len(self.tokens)
+
+    def __getitem__(self, idx: int):
+        return self.tokens[idx], self.labels[idx]
+
+
+# ── Data helpers ──────────────────────────────────────────────────────────────
+
+def generate_labels(scorer, prototypes, images, aesthetic_keys) -> np.ndarray:
+    """Compute z-score prototype labels [N, 10] ∈ [0, 10]."""
     labels = []
     for i, img in enumerate(images):
         ranked    = scorer.rank_aesthetics(img, prototypes)
@@ -53,68 +69,50 @@ def generate_labels(scorer, prototypes, images, aesthetic_keys):
     return np.array(labels, dtype=np.float32)
 
 
-def extract_patch_tokens(scorer_v2, images, batch_size=16):
-    """
-    Extract [N, 50, 768] CLIP patch tokens in mini-batches.
-    CLIP weights are frozen; no gradients needed.
-    """
+def extract_patch_tokens(scorer_v2, images, batch_size: int = 16) -> np.ndarray:
+    """Extract [N, 50, 768] CLIP patch tokens in mini-batches (numpy output)."""
     all_tokens = []
     for i in range(0, len(images), batch_size):
-        batch = images[i : i + batch_size]
-        all_tokens.append(scorer_v2.extract_patch_tokens(batch))
-        print(f"  Extracted {min(i+batch_size, len(images))}/{len(images)}", end="\r")
+        batch  = images[i : i + batch_size]
+        tokens = scorer_v2.extract_patch_tokens(batch).cpu().numpy()
+        all_tokens.append(tokens)
+        print(f"  Extracted {min(i + batch_size, len(images))}/{len(images)}", end="\r")
     print()
     return np.concatenate(all_tokens, axis=0)
 
 
-# ── Loss ──────────────────────────────────────────────────────────────────────
-
-def mse_sigmoid_loss(logits, targets):
-    """
-    MSE loss with sigmoid × 10 output.
-    targets: [B, 10] in [0, 10].
-    Returns (scalar loss, d_logits [B, 10]).
-    """
-    sig   = sigmoid(logits)
-    preds = sig * 10.0
-    diff  = preds - targets
-    loss  = float(np.mean(diff ** 2))
-    # dL/d_logits = 2/N * diff * 10 * sig * (1 - sig)
-    d_logits = (2.0 / targets.size) * diff * 10.0 * sig * (1.0 - sig)
-    return loss, d_logits.astype(np.float32)
-
-
 # ── Training loop ─────────────────────────────────────────────────────────────
 
-def run_epoch(model, tokens, labels, batch_size, lr, training=True):
-    N = len(tokens)
-    idx = np.random.permutation(N) if training else np.arange(N)
-    total_loss = 0.0
-    n_batches  = 0
-    for start in range(0, N, batch_size):
-        batch_idx = idx[start : start + batch_size]
-        bt = tokens[batch_idx]   # [B, 50, 768]
-        bl = labels[batch_idx]   # [B, 10]
+def train_epoch(model, loader, optimizer, device) -> float:
+    model.train()
+    total = 0.0
+    for tokens, labels in loader:
+        tokens, labels = tokens.to(device), labels.to(device)
+        preds = torch.sigmoid(model(tokens)) * 10.0
+        loss  = F.mse_loss(preds, labels)
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
+        total += loss.item()
+    return total / len(loader)
 
-        logits, cache = model.forward(bt)
-        loss, d_logits = mse_sigmoid_loss(logits, bl)
 
-        if training:
-            grads = model.backward(d_logits, cache)
-            model.adam_step(grads, lr=lr)
-
-        total_loss += loss
-        n_batches  += 1
-
-    return total_loss / n_batches
+@torch.no_grad()
+def evaluate(model, loader, device) -> float:
+    model.eval()
+    total = 0.0
+    for tokens, labels in loader:
+        tokens, labels = tokens.to(device), labels.to(device)
+        preds = torch.sigmoid(model(tokens)) * 10.0
+        total += F.mse_loss(preds, labels).item()
+    return total / len(loader)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Train the NumPy AestheticTransformer."
-    )
+    parser = argparse.ArgumentParser(description="Train the AestheticTransformer.")
     parser.add_argument("--n-images",   type=int,   default=500)
     parser.add_argument("--epochs",     type=int,   default=20)
     parser.add_argument("--batch-size", type=int,   default=16)
@@ -128,11 +126,15 @@ def main():
 
     random.seed(args.seed)
     np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
+    if torch.cuda.is_available():           device = "cuda"
+    elif torch.backends.mps.is_available(): device = "mps"
+    else:                                   device = "cpu"
+    print(f"Device: {device}\n")
 
     aesthetic_keys = list(AESTHETICS.keys())
-    print(f"Aesthetics: {aesthetic_keys}\n")
 
-    # Prototypes are needed for pseudo-label generation
     if not os.path.exists(PROTO_PATH):
         print(f"ERROR: run `python train.py` first to build {PROTO_PATH}")
         return
@@ -141,9 +143,9 @@ def main():
     # ── Feature extraction + label generation ────────────────────────────
     if args.use_cache and os.path.exists(CACHE_PATH):
         print(f"Loading cache from {CACHE_PATH} …")
-        cache_data  = np.load(CACHE_PATH)
-        all_tokens  = cache_data["tokens"]
-        all_labels  = cache_data["labels"]
+        cached      = np.load(CACHE_PATH)
+        all_tokens  = cached["tokens"]
+        all_labels  = cached["labels"]
         print(f"  {len(all_tokens)} cached samples.\n")
     else:
         print(f"Downloading {args.n_images} images …")
@@ -156,12 +158,12 @@ def main():
         print(f"Downloaded {len(images)} images.\n")
 
         print("Generating pseudo-labels …")
-        scorer     = AestheticScorer()
+        scorer     = AestheticScorer(device=device)
         all_labels = generate_labels(scorer, prototypes, images, aesthetic_keys)
         del scorer
 
         print("\nExtracting CLIP patch tokens …")
-        sv2        = AestheticScorerV2()
+        sv2        = AestheticScorerV2(device=device)
         all_tokens = extract_patch_tokens(sv2, images)
         del sv2
 
@@ -177,36 +179,41 @@ def main():
     idx = list(range(N))
     random.shuffle(idx)
     split     = max(1, int(N * (1 - args.val_split)))
-    train_idx = np.array(idx[:split])
-    val_idx   = np.array(idx[split:])
+    train_idx = idx[:split]
+    val_idx   = idx[split:]
 
-    train_tokens = all_tokens[train_idx]
-    train_labels = all_labels[train_idx]
-    val_tokens   = all_tokens[val_idx]
-    val_labels   = all_labels[val_idx]
-    print(f"Train: {len(train_tokens)} | Val: {len(val_tokens)}\n")
+    train_ds = AestheticDataset(all_tokens[train_idx], all_labels[train_idx])
+    val_ds   = AestheticDataset(all_tokens[val_idx],   all_labels[val_idx])
+
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
+    val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False)
+    print(f"Train: {len(train_ds)} | Val: {len(val_ds)}\n")
 
     # ── Model ─────────────────────────────────────────────────────────────
-    model    = AestheticTransformer(num_aesthetics=len(aesthetic_keys), seed=args.seed)
-    n_params = sum(v.size for v in model.params.values())
-    print(f"AestheticTransformer: {n_params:,} parameters\n")
+    model    = AestheticTransformer(num_aesthetics=len(aesthetic_keys)).to(device)
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"AestheticTransformer: {n_params:,} trainable parameters\n")
 
-    # ── Training loop ─────────────────────────────────────────────────────
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=args.epochs, eta_min=args.lr * 0.01
+    )
+
+    # ── Training ──────────────────────────────────────────────────────────
     best_val = float("inf")
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
+    print(f"Training for {args.epochs} epochs …\n")
 
     for epoch in range(1, args.epochs + 1):
-        train_loss = run_epoch(
-            model, train_tokens, train_labels, args.batch_size, args.lr, training=True
-        )
-        val_loss = run_epoch(
-            model, val_tokens,   val_labels,   args.batch_size, args.lr, training=False
-        )
+        train_loss = train_epoch(model, train_loader, optimizer, device)
+        val_loss   = evaluate(model, val_loader, device)
+        scheduler.step()
 
         tag = ""
         if val_loss < best_val:
             best_val = val_loss
-            model.save(args.output, aesthetic_names=aesthetic_keys)
+            torch.save({"model": model.state_dict(), "aesthetic_names": aesthetic_keys},
+                       args.output)
             tag = "  ← best"
 
         print(f"Epoch {epoch:3d}/{args.epochs}  "

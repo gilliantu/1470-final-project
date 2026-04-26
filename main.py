@@ -31,7 +31,7 @@ from transformer_model import AestheticScorerV2
 from preprocess import download_image
 from aesthetics import AESTHETICS, AESTHETIC_NAMES
 
-CKPT_PATH = os.path.join(os.path.dirname(__file__), "data", "transformer.npz")
+CKPT_PATH = os.path.join(os.path.dirname(__file__), "data", "transformer.pt")
 
 
 def print_result(result: dict, show_bar: bool = True) -> None:
