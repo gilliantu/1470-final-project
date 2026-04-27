@@ -26,6 +26,27 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 from transformers import CLIPModel, CLIPProcessor
+import torchvision.transforms as T
+
+
+# ── Background removal ────────────────────────────────────────────────────────
+
+def remove_background(img: Image.Image) -> Image.Image:
+    """
+    Strip the background from an image, leaving only the foreground subject
+    (person / outfit) composited onto a plain white background.
+
+    Uses rembg (U2-Net) for segmentation.  Falls back to the original image
+    if rembg is not installed.
+    """
+    try:
+        from rembg import remove
+        rgba = remove(img.convert("RGBA"))          # RGBA: alpha = subject mask
+        white = Image.new("RGB", rgba.size, (255, 255, 255))
+        white.paste(rgba, mask=rgba.split()[3])     # paste subject over white
+        return white
+    except ImportError:
+        return img
 
 
 # ── Attention (from student_hw_model_transformer.py) ─────────────────────────
@@ -321,11 +342,15 @@ class AestheticScorerV2:
         """
         Extract both feature types from frozen CLIP in one forward pass.
 
+        Background is removed from each image first so CLIP attends to the
+        outfit / person rather than the surrounding scene.
+
         Returns:
           patch_tokens: [B, 50, 768]  raw vision backbone hidden states
           clip_emb:     [B, 512]      L2-normalised projected embedding
                                       (same feature used by the prototype scorer)
         """
+        images = [remove_background(img) for img in images]
         inputs = self.processor(images=images, return_tensors="pt").to(self.device)
         with torch.no_grad():
             out      = self.clip.vision_model(pixel_values=inputs["pixel_values"])
@@ -361,6 +386,291 @@ class AestheticScorerV2:
 
     def rank_aesthetics(self, image: Image.Image) -> list[dict]:
         """Score one image; returns list sorted by score descending."""
+        scores = self.score_images([image])[0]
+        names  = self.aesthetic_names or [str(i) for i in range(len(scores))]
+        results = [
+            {"aesthetic": name,
+             "score":     round(float(scores[i]), 2),
+             "label":     _score_label(float(scores[i]))}
+            for i, name in enumerate(names)
+        ]
+        return sorted(results, key=lambda r: r["score"], reverse=True)
+
+    def score_image(self, image: Image.Image, aesthetic_name: str) -> dict:
+        for r in self.rank_aesthetics(image):
+            if r["aesthetic"] == aesthetic_name:
+                return r
+        raise ValueError(f"'{aesthetic_name}' not in {self.aesthetic_names}")
+
+
+# ── CLIP-free image preprocessing ────────────────────────────────────────────
+
+_IMAGENET_MEAN = (0.485, 0.456, 0.406)
+_IMAGENET_STD  = (0.229, 0.224, 0.225)
+
+def build_transform(img_size: int = 224) -> T.Compose:
+    """Val / inference transform — deterministic."""
+    return T.Compose([
+        T.Resize((img_size, img_size)),
+        T.ToTensor(),
+        T.Normalize(mean=_IMAGENET_MEAN, std=_IMAGENET_STD),
+    ])
+
+
+def build_train_transform(img_size: int = 224) -> T.Compose:
+    """Training transform — adds augmentation to reduce overfitting."""
+    return T.Compose([
+        T.RandomResizedCrop(img_size, scale=(0.75, 1.0)),
+        T.RandomHorizontalFlip(),
+        T.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2, hue=0.05),
+        T.ToTensor(),
+        T.Normalize(mean=_IMAGENET_MEAN, std=_IMAGENET_STD),
+    ])
+
+
+# ── Patch embedder (replaces CLIP's frozen ViT backbone) ─────────────────────
+
+class PatchEmbedder(nn.Module):
+    """
+    ViT-style patch tokenizer implemented from scratch — no CLIP dependency.
+
+    A single Conv2d with kernel_size=patch_size, stride=patch_size is
+    mathematically equivalent to flattening each patch and multiplying by a
+    shared linear projection.  This is exactly what CLIP ViT-B/32 does
+    internally, but here the weights are randomly initialised and trained
+    end-to-end.
+
+    For 224×224 input with patch_size=32: 7×7 = 49 spatial patches.
+    Prepending a learnable CLS token gives 50 tokens — matching CLIP ViT-B/32
+    so the downstream transformer and positional encoding are unchanged.
+    """
+
+    IMG_SIZE   = 224
+    PATCH_SIZE = 32
+
+    def __init__(self, patch_dim: int = 768, in_channels: int = 3) -> None:
+        super().__init__()
+        self.patch_proj = nn.Conv2d(
+            in_channels, patch_dim,
+            kernel_size=self.PATCH_SIZE, stride=self.PATCH_SIZE, bias=False,
+        )
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, patch_dim))
+        nn.init.trunc_normal_(self.cls_token,      std=0.02)
+        nn.init.trunc_normal_(self.patch_proj.weight, std=0.02)
+
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        """
+        pixel_values: [B, 3, 224, 224]
+        Returns:      [B, 50, patch_dim]  (50 = 1 CLS + 49 patches)
+        """
+        B = pixel_values.size(0)
+        x = self.patch_proj(pixel_values)   # [B, patch_dim, 7, 7]
+        x = x.flatten(2).transpose(1, 2)   # [B, 49, patch_dim]
+        cls = self.cls_token.expand(B, -1, -1)
+        return torch.cat([cls, x], dim=1)  # [B, 50, patch_dim]
+
+
+# ── Pretrained patch embedder (ImageNet ResNet-50 backbone) ──────────────────
+
+class PretrainedPatchEmbedder(nn.Module):
+    """
+    Multi-scale ResNet-50 patch embedder (ImageNet weights, no CLIP).
+
+    Fuses layer3 [B, 1024, 14, 14] and layer4 [B, 2048, 7, 7] features:
+      - layer3 pooled to 7×7 captures mid-level textures and fabric patterns
+      - layer4 at 7×7 captures high-level semantic style cues
+      - concatenated [B, 3072, 7, 7] → 1×1 conv → [B, patch_dim, 7, 7]
+      - reshape + CLS → [B, 50, patch_dim]
+
+    Using both scales gives the transformer richer style information than
+    layer4 alone — fabric texture comes from layer3, overall outfit structure
+    from layer4.
+
+    Backbone is frozen by default (fast, cacheable).
+    Set fine_tune=True to also train layer3 + layer4 (more accurate, slower).
+    """
+
+    def __init__(self, patch_dim: int = 768, fine_tune: bool = False) -> None:
+        super().__init__()
+        import torchvision.models as tvm
+        backbone = tvm.resnet50(weights=tvm.ResNet50_Weights.IMAGENET1K_V1)
+
+        self.early = nn.Sequential(
+            backbone.conv1, backbone.bn1, backbone.relu, backbone.maxpool,
+            backbone.layer1, backbone.layer2,
+        )
+        self.layer3   = backbone.layer3          # [B, 1024, 14, 14]
+        self.layer4   = backbone.layer4          # [B, 2048,  7,  7]
+        self.pool3    = nn.AdaptiveAvgPool2d(7)  # [B, 1024,  7,  7]
+
+        # Freeze early layers always; optionally unfreeze layer3+layer4
+        for p in self.early.parameters():
+            p.requires_grad = False
+        for p in self.layer3.parameters():
+            p.requires_grad = fine_tune
+        for p in self.layer4.parameters():
+            p.requires_grad = fine_tune
+
+        self.proj      = nn.Conv2d(1024 + 2048, patch_dim, kernel_size=1)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, patch_dim))
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        nn.init.trunc_normal_(self.proj.weight, std=0.02)
+        nn.init.zeros_(self.proj.bias)
+
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        """
+        pixel_values: [B, 3, 224, 224]
+        Returns:      [B, 50, patch_dim]
+        """
+        B  = pixel_values.size(0)
+        x  = self.early(pixel_values)           # [B, 512,  28, 28]
+        l3 = self.layer3(x)                     # [B, 1024, 14, 14]
+        l4 = self.layer4(l3)                    # [B, 2048,  7,  7]
+        l3p = self.pool3(l3)                    # [B, 1024,  7,  7]
+        fused = torch.cat([l3p, l4], dim=1)     # [B, 3072,  7,  7]
+        x  = self.proj(fused)                   # [B, patch_dim, 7, 7]
+        x  = x.flatten(2).transpose(1, 2)       # [B, 49, patch_dim]
+        cls = self.cls_token.expand(B, -1, -1)
+        return torch.cat([cls, x], dim=1)       # [B, 50, patch_dim]
+
+
+# ── Aesthetic transformer V2 (no CLIP embedding bridge) ──────────────────────
+
+class AestheticTransformerV2(nn.Module):
+    """
+    Encoder-only aesthetic classifier with zero CLIP dependency.
+
+    Differences from AestheticTransformer:
+      - No clip_bridge: the CLS token alone summarises the image
+      - input_proj maps patch_dim → d_model (patch_dim comes from PatchEmbedder)
+      - All attention blocks, positional encoding, and the MLP head are
+        identical to AestheticTransformer
+    """
+
+    N_PATCHES = 50  # 1 CLS + 7×7 for 224×224 / patch_size=32
+
+    def __init__(
+        self,
+        num_aesthetics: int = 10,
+        patch_dim: int = 768,
+        d_model: int = 384,
+        num_heads: int = 8,
+        num_layers: int = 6,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        self.input_proj = nn.Linear(patch_dim, d_model)
+
+        pe = positional_encoding(self.N_PATCHES, d_model)
+        self.register_buffer("pos_enc", pe.unsqueeze(0))  # [1, 50, d_model]
+
+        self.blocks = nn.ModuleList([
+            TransformerBlock(d_model, num_heads, dropout) for _ in range(num_layers)
+        ])
+        self.norm = nn.LayerNorm(d_model)
+
+        self.head = nn.Sequential(
+            nn.Linear(d_model, d_model // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model // 2, num_aesthetics),
+        )
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def forward(self, patch_tokens: torch.Tensor) -> torch.Tensor:
+        """
+        patch_tokens: [B, 50, patch_dim]
+        Returns logits: [B, num_aesthetics]
+        """
+        x = self.input_proj(patch_tokens) + self.pos_enc  # [B, 50, d_model]
+        for block in self.blocks:
+            x = block(x)
+        cls = self.norm(x)[:, 0]   # CLS token  [B, d_model]
+        return self.head(cls)       # [B, num_aesthetics]
+
+
+# ── Fully CLIP-free inference wrapper ────────────────────────────────────────
+
+class AestheticScorerV3:
+    """
+    Fully CLIP-free aesthetic scorer.
+
+    PretrainedPatchEmbedder (ResNet-50, ImageNet weights) replaces CLIP's ViT
+    backbone, giving semantically rich patch tokens without any CLIP dependency.
+    AestheticTransformerV2 classifies from the CLS token.
+
+    Image preprocessing uses torchvision transforms (replaces CLIPProcessor).
+    """
+
+    def __init__(
+        self,
+        checkpoint_path: str | None = None,
+        aesthetic_names: list[str] | None = None,
+        patch_dim: int = 768,
+        d_model: int = 384,
+        fine_tune: bool = False,
+        device: str | None = None,
+    ) -> None:
+        if device is None:
+            if torch.cuda.is_available():           device = "cuda"
+            elif torch.backends.mps.is_available(): device = "mps"
+            else:                                   device = "cpu"
+        self.device = device
+
+        self.embedder    = PretrainedPatchEmbedder(patch_dim=patch_dim, fine_tune=fine_tune).to(device)
+        self.transformer = AestheticTransformerV2(patch_dim=patch_dim, d_model=d_model).to(device)
+        self.transform   = build_transform()
+
+        if checkpoint_path and os.path.exists(checkpoint_path):
+            ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
+            self.embedder.load_state_dict(ckpt["embedder"])
+            self.transformer.load_state_dict(ckpt["transformer"])
+            self.aesthetic_names: list[str] = ckpt.get("aesthetic_names", aesthetic_names or [])
+            print(f"[AestheticScorerV3] Checkpoint loaded from {checkpoint_path}")
+        else:
+            self.aesthetic_names = aesthetic_names or []
+            if checkpoint_path:
+                print(f"[AestheticScorerV3] No checkpoint at {checkpoint_path}; random weights.")
+
+        self.embedder.eval()
+        self.transformer.eval()
+
+    def preprocess(self, images: list[Image.Image]) -> torch.Tensor:
+        """PIL images → normalised [B, 3, 224, 224] tensor."""
+        return torch.stack(
+            [self.transform(img.convert("RGB")) for img in images]
+        ).to(self.device)
+
+    def extract_features(self, images: list[Image.Image]) -> torch.Tensor:
+        """Background-remove then PatchEmbed → [B, 50, patch_dim]."""
+        images = [remove_background(img) for img in images]
+        pixel_values = self.preprocess(images)
+        with torch.no_grad():
+            return self.embedder(pixel_values)
+
+    @staticmethod
+    def _zscore(raw: np.ndarray) -> np.ndarray:
+        mean = raw.mean(axis=-1, keepdims=True)
+        std  = raw.std(axis=-1,  keepdims=True)
+        std  = np.where(std < 1e-6, 1.0, std)
+        return np.clip(5.0 + (raw - mean) / std * 2.0, 0.0, 10.0)
+
+    @torch.no_grad()
+    def score_images(self, images: list[Image.Image]) -> np.ndarray:
+        """Return aesthetic scores in [0, 10], shape [N, num_aesthetics]."""
+        tokens = self.extract_features(images)
+        self.transformer.eval()
+        logits = self.transformer(tokens).cpu().numpy()
+        return self._zscore(logits)
+
+    def rank_aesthetics(self, image: Image.Image) -> list[dict]:
         scores = self.score_images([image])[0]
         names  = self.aesthetic_names or [str(i) for i in range(len(scores))]
         results = [

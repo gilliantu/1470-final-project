@@ -27,11 +27,12 @@ import sys
 
 from PIL import Image
 
-from transformer_model import AestheticScorerV2
+from transformer_model import AestheticScorerV2, AestheticScorerV3
 from preprocess import download_image
 from aesthetics import AESTHETICS, AESTHETIC_NAMES
 
-CKPT_PATH = os.path.join(os.path.dirname(__file__), "data", "transformer.pt")
+CKPT_PATH_V2 = os.path.join(os.path.dirname(__file__), "data", "transformer.pt")
+CKPT_PATH_V3 = os.path.join(os.path.dirname(__file__), "data", "transformer_v3.pt")
 
 
 def print_result(result: dict, show_bar: bool = True) -> None:
@@ -91,8 +92,13 @@ Examples:
         help="List all available aesthetics and exit.",
     )
     parser.add_argument(
-        "--checkpoint", type=str, default=CKPT_PATH,
-        help=f"Path to trained transformer checkpoint (default {CKPT_PATH}).",
+        "--model", type=str, default="v3", choices=["v2", "v3"],
+        help="v2 = CLIP-based scorer, v3 = CLIP-free scorer (default: v3).",
+    )
+    parser.add_argument(
+        "--checkpoint", type=str, default=None,
+        help="Path to a custom checkpoint. Defaults to data/transformer_v3.pt for v3, "
+             "data/transformer.pt for v2.",
     )
     args = parser.parse_args()
 
@@ -128,18 +134,30 @@ Examples:
         image_label = args.url.split("/")[-1] or "downloaded_image"
 
     # ── Load model ─────────────────────────────────────────────────────
-    if not os.path.exists(args.checkpoint):
-        print(f"[ERROR] Checkpoint not found: {args.checkpoint}")
-        print("Run `python train.py` then `python train_transformer.py` first.")
+    ckpt = args.checkpoint or (CKPT_PATH_V3 if args.model == "v3" else CKPT_PATH_V2)
+    if not os.path.exists(ckpt):
+        print(f"[ERROR] Checkpoint not found: {ckpt}")
+        train_cmd = ("python train_transformer.py --model-version v3"
+                     if args.model == "v3" else
+                     "python train.py && python train_transformer.py --model-version v2")
+        print(f"Run: {train_cmd}")
         sys.exit(1)
 
-    scorer = AestheticScorerV2(
-        checkpoint_path=args.checkpoint,
-        aesthetic_names=list(AESTHETIC_NAMES.keys()),
-    )
+    if args.model == "v3":
+        scorer = AestheticScorerV3(
+            checkpoint_path=ckpt,
+            aesthetic_names=list(AESTHETIC_NAMES.keys()),
+        )
+    else:
+        scorer = AestheticScorerV2(
+            checkpoint_path=ckpt,
+            aesthetic_names=list(AESTHETIC_NAMES.keys()),
+        )
 
     print(f"\nImage: {image_label}")
     print(f"Size : {image.size[0]}×{image.size[1]} px")
+
+    print(f"Model : {'V3 (CLIP-free)' if args.model == 'v3' else 'V2 (CLIP-based)'}")
 
     # ── Score ──────────────────────────────────────────────────────────
     if args.aesthetic:
