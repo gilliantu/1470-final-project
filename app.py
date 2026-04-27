@@ -80,5 +80,64 @@ def score():
     return jsonify({"mode": "all", "all": ranked})
 
 
+@app.route("/recommend", methods=["POST"])
+def recommend():
+    # Base outfit image
+    if "base" not in request.files or not request.files["base"].filename:
+        return jsonify({"error": "No base outfit image provided."}), 400
+    base_img = Image.open(request.files["base"].stream).convert("RGB")
+
+    # Item images (multiple files under key "items")
+    item_files = request.files.getlist("items")
+    valid_items = [
+        (f.filename, Image.open(f.stream).convert("RGB"))
+        for f in item_files if f.filename
+    ]
+    if not valid_items:
+        return jsonify({"error": "No item images provided."}), 400
+
+    # Score base outfit
+    base_ranked = scorer.rank_aesthetics(base_img, prototypes)
+    for r in base_ranked:
+        r["label_display"] = AESTHETIC_NAMES.get(r["aesthetic"], r["aesthetic"])
+    base_top_aesthetic = base_ranked[0]["aesthetic"]
+
+    # Score each item
+    items_out = []
+    for idx, (name, img) in enumerate(valid_items):
+        ranked = scorer.rank_aesthetics(img, prototypes)
+        for r in ranked:
+            r["label_display"] = AESTHETIC_NAMES.get(r["aesthetic"], r["aesthetic"])
+        item_top = ranked[0]
+        base_aes_entry = next(
+            (r for r in ranked if r["aesthetic"] == base_top_aesthetic), None
+        )
+        items_out.append({
+            "index": idx,
+            "name": name,
+            "top_aesthetic": item_top["aesthetic"],
+            "top_aesthetic_display": item_top["label_display"],
+            "top_score": round(item_top["score"], 2),
+            "base_aesthetic_score": round(base_aes_entry["score"], 2) if base_aes_entry else 0.0,
+            "matches_base": item_top["aesthetic"] == base_top_aesthetic,
+        })
+
+    # Recommend: exact aesthetic match first, otherwise highest score for base aesthetic
+    exact_matches = [it for it in items_out if it["matches_base"]]
+    if exact_matches:
+        recommended = max(exact_matches, key=lambda x: x["base_aesthetic_score"])
+    else:
+        recommended = max(items_out, key=lambda x: x["base_aesthetic_score"])
+
+    return jsonify({
+        "base_aesthetic": base_top_aesthetic,
+        "base_aesthetic_display": AESTHETIC_NAMES.get(base_top_aesthetic, base_top_aesthetic),
+        "base_top_score": round(base_ranked[0]["score"], 2),
+        "items": items_out,
+        "recommended_index": recommended["index"],
+        "exact_match": len(exact_matches) > 0,
+    })
+
+
 if __name__ == "__main__":
     app.run(debug=False, port=5001)

@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Outfit Aesthetic Scorer</title>
   <style>
-    /* ── Reset & Base ───────────────────────────────────────── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
@@ -19,32 +18,47 @@
       padding: 2rem 1rem 4rem;
     }
 
-    /* ── Header ─────────────────────────────────────────────── */
     header {
       text-align: center;
       margin-bottom: 2.5rem;
     }
-    header h1 {
-      font-size: 2.2rem;
-      font-weight: 700;
-      letter-spacing: -0.5px;
-      color: #1a1a1a;
-    }
-    header p {
-      margin-top: 0.4rem;
-      color: #666;
-      font-size: 0.95rem;
-    }
+    header h1 { font-size: 2.2rem; font-weight: 700; letter-spacing: -0.5px; color: #1a1a1a; }
+    header p  { margin-top: 0.4rem; color: #666; font-size: 0.95rem; }
 
-    /* ── Card ───────────────────────────────────────────────── */
     .card {
       background: #fff;
       border-radius: 16px;
       box-shadow: 0 4px 24px rgba(0,0,0,0.08);
       padding: 2rem;
       width: 100%;
-      max-width: 680px;
+      max-width: 720px;
     }
+
+    /* ── Tabs ───────────────────────────────────────────────── */
+    .tabs {
+      display: flex;
+      gap: 0;
+      margin-bottom: 1.8rem;
+      border-bottom: 2px solid #eee;
+    }
+    .tab-btn {
+      flex: 1;
+      padding: 0.65rem 1rem;
+      background: none;
+      border: none;
+      font-size: 0.92rem;
+      font-weight: 600;
+      color: #999;
+      cursor: pointer;
+      border-bottom: 3px solid transparent;
+      margin-bottom: -2px;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .tab-btn.active { color: #b5838d; border-bottom-color: #b5838d; }
+    .tab-btn:hover:not(.active) { color: #666; }
+
+    .tab-section { display: none; }
+    .tab-section.active { display: block; }
 
     /* ── Upload zone ────────────────────────────────────────── */
     .upload-zone {
@@ -56,243 +70,200 @@
       transition: border-color 0.2s, background 0.2s;
       position: relative;
     }
+    .upload-zone.compact { padding: 1.4rem 1rem; }
     .upload-zone:hover, .upload-zone.dragover {
       border-color: #b5838d;
       background: #fdf5f6;
     }
     .upload-zone input[type="file"] {
-      position: absolute;
-      inset: 0;
-      opacity: 0;
-      cursor: pointer;
-      width: 100%;
-      height: 100%;
+      position: absolute; inset: 0; opacity: 0; cursor: pointer;
+      width: 100%; height: 100%;
     }
-    .upload-icon { font-size: 2.5rem; margin-bottom: 0.5rem; }
-    .upload-zone p { color: #888; font-size: 0.9rem; margin-top: 0.3rem; }
+    .upload-icon { font-size: 2rem; margin-bottom: 0.4rem; }
+    .upload-zone p { color: #888; font-size: 0.88rem; margin-top: 0.25rem; }
 
-    /* ── Preview ────────────────────────────────────────────── */
-    #preview-wrap {
-      display: none;
-      margin-top: 1.2rem;
-      text-align: center;
-    }
-    #preview-wrap img {
-      max-height: 280px;
-      max-width: 100%;
-      border-radius: 10px;
-      object-fit: contain;
+    /* ── Preview (single) ───────────────────────────────────── */
+    .preview-wrap { display: none; margin-top: 1.2rem; text-align: center; }
+    .preview-wrap img {
+      max-height: 240px; max-width: 100%;
+      border-radius: 10px; object-fit: contain;
       box-shadow: 0 2px 12px rgba(0,0,0,0.12);
     }
-    #remove-btn {
-      display: block;
-      margin: 0.6rem auto 0;
-      background: none;
-      border: none;
-      color: #999;
-      font-size: 0.8rem;
-      cursor: pointer;
-      text-decoration: underline;
+    .remove-btn {
+      display: block; margin: 0.5rem auto 0;
+      background: none; border: none; color: #999;
+      font-size: 0.78rem; cursor: pointer; text-decoration: underline;
     }
-    #remove-btn:hover { color: #e05;  }
+    .remove-btn:hover { color: #e05; }
 
     /* ── Controls ───────────────────────────────────────────── */
     .controls {
-      margin-top: 1.4rem;
-      display: flex;
-      gap: 0.8rem;
-      flex-wrap: wrap;
-      align-items: center;
+      margin-top: 1.4rem; display: flex; gap: 0.8rem;
+      flex-wrap: wrap; align-items: center;
     }
-    .controls label {
-      font-size: 0.85rem;
-      color: #555;
-      white-space: nowrap;
-    }
+    .controls label { font-size: 0.85rem; color: #555; white-space: nowrap; }
     .controls select {
-      flex: 1;
-      min-width: 160px;
+      flex: 1; min-width: 160px;
       padding: 0.55rem 0.8rem;
-      border: 1.5px solid #ddd;
-      border-radius: 8px;
-      font-size: 0.9rem;
-      background: #fff;
-      color: #2b2b2b;
-      cursor: pointer;
-      appearance: none;
+      border: 1.5px solid #ddd; border-radius: 8px;
+      font-size: 0.9rem; background: #fff; color: #2b2b2b;
+      cursor: pointer; appearance: none;
       background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23888' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
-      background-repeat: no-repeat;
-      background-position: right 0.8rem center;
-      padding-right: 2rem;
+      background-repeat: no-repeat; background-position: right 0.8rem center; padding-right: 2rem;
     }
     .controls select:focus { outline: none; border-color: #b5838d; }
 
-    #score-btn {
+    .primary-btn {
       padding: 0.6rem 1.6rem;
-      background: #b5838d;
-      color: #fff;
-      border: none;
-      border-radius: 8px;
-      font-size: 0.95rem;
-      font-weight: 600;
-      cursor: pointer;
-      transition: background 0.15s, transform 0.1s;
+      background: #b5838d; color: #fff; border: none;
+      border-radius: 8px; font-size: 0.95rem; font-weight: 600;
+      cursor: pointer; transition: background 0.15s, transform 0.1s;
       white-space: nowrap;
     }
-    #score-btn:hover  { background: #9d6b74; }
-    #score-btn:active { transform: scale(0.97); }
-    #score-btn:disabled { background: #ccc; cursor: not-allowed; }
+    .primary-btn:hover  { background: #9d6b74; }
+    .primary-btn:active { transform: scale(0.97); }
+    .primary-btn:disabled { background: #ccc; cursor: not-allowed; }
 
     /* ── Spinner ────────────────────────────────────────────── */
-    #spinner {
-      display: none;
-      text-align: center;
-      padding: 1.5rem 0;
-      color: #888;
-      font-size: 0.9rem;
-    }
-    .dot-flashing {
-      display: inline-flex;
-      gap: 6px;
-      vertical-align: middle;
-      margin-right: 6px;
-    }
+    .spinner { display: none; text-align: center; padding: 1.5rem 0; color: #888; font-size: 0.9rem; }
+    .dot-flashing { display: inline-flex; gap: 6px; vertical-align: middle; margin-right: 6px; }
     .dot-flashing span {
-      width: 7px; height: 7px;
-      border-radius: 50%;
-      background: #b5838d;
+      width: 7px; height: 7px; border-radius: 50%; background: #b5838d;
       animation: blink 1.2s infinite;
     }
     .dot-flashing span:nth-child(2) { animation-delay: 0.2s; }
     .dot-flashing span:nth-child(3) { animation-delay: 0.4s; }
     @keyframes blink { 0%,80%,100% { opacity:0.2; } 40% { opacity:1; } }
 
-    /* ── Results ────────────────────────────────────────────── */
-    #results { display: none; margin-top: 1.8rem; }
-
+    /* ── Score results ──────────────────────────────────────── */
+    .results { display: none; margin-top: 1.8rem; }
     .result-header {
-      font-size: 0.8rem;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      color: #aaa;
-      margin-bottom: 1rem;
+      font-size: 0.8rem; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.08em; color: #aaa; margin-bottom: 1rem;
     }
-
-    /* Single result hero */
-    .hero-result {
-      text-align: center;
-      padding: 1.4rem 0 0.8rem;
-    }
-    .hero-aesthetic {
-      font-size: 1.5rem;
-      font-weight: 700;
-      color: #b5838d;
-    }
-    .hero-label {
-      font-size: 0.85rem;
-      color: #888;
-      margin-top: 0.2rem;
-    }
-    .hero-score {
-      font-size: 3.8rem;
-      font-weight: 800;
-      color: #1a1a1a;
-      line-height: 1;
-      margin: 0.5rem 0 0.2rem;
-    }
+    .hero-result { text-align: center; padding: 1.4rem 0 0.8rem; }
+    .hero-aesthetic { font-size: 1.5rem; font-weight: 700; color: #b5838d; }
+    .hero-label { font-size: 0.85rem; color: #888; margin-top: 0.2rem; }
+    .hero-score { font-size: 3.8rem; font-weight: 800; color: #1a1a1a; line-height: 1; margin: 0.5rem 0 0.2rem; }
     .hero-score span { font-size: 1.4rem; font-weight: 400; color: #888; }
-    .hero-bar-wrap {
-      margin: 0.8rem auto 0;
-      max-width: 360px;
-      height: 12px;
-      background: #eee;
-      border-radius: 99px;
-      overflow: hidden;
-    }
-    .hero-bar-fill {
-      height: 100%;
-      border-radius: 99px;
-      background: linear-gradient(90deg, #e8b4b8, #b5838d);
-      transition: width 0.6s cubic-bezier(.22,.68,0,1.2);
-    }
-    .hero-sim {
-      font-size: 0.78rem;
-      color: #bbb;
-      margin-top: 0.5rem;
-    }
-
-    /* All-aesthetics table */
-    .aes-list {
-      display: flex;
-      flex-direction: column;
-      gap: 0.55rem;
-    }
+    .hero-bar-wrap { margin: 0.8rem auto 0; max-width: 360px; height: 12px; background: #eee; border-radius: 99px; overflow: hidden; }
+    .hero-bar-fill { height: 100%; border-radius: 99px; background: linear-gradient(90deg, #e8b4b8, #b5838d); transition: width 0.6s cubic-bezier(.22,.68,0,1.2); }
+    .hero-sim { font-size: 0.78rem; color: #bbb; margin-top: 0.5rem; }
+    .aes-list { display: flex; flex-direction: column; gap: 0.55rem; }
     .aes-row {
-      display: grid;
-      grid-template-columns: 140px 1fr 60px 90px;
-      align-items: center;
-      gap: 0.6rem;
-      padding: 0.45rem 0.5rem;
-      border-radius: 8px;
-      transition: background 0.15s;
+      display: grid; grid-template-columns: 140px 1fr 60px 90px;
+      align-items: center; gap: 0.6rem; padding: 0.45rem 0.5rem;
+      border-radius: 8px; transition: background 0.15s;
     }
     .aes-row:hover { background: #faf7f5; }
-    .aes-row.top-row {
-      background: #fdf0f2;
-      font-weight: 600;
-    }
-    .aes-name {
-      font-size: 0.88rem;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .bar-track {
-      height: 8px;
-      background: #eee;
-      border-radius: 99px;
-      overflow: hidden;
-    }
-    .bar-fill {
-      height: 100%;
-      border-radius: 99px;
-      background: linear-gradient(90deg, #e8b4b8, #b5838d);
-      transition: width 0.5s ease;
-    }
-    .aes-score {
-      font-size: 0.88rem;
-      text-align: right;
-      font-variant-numeric: tabular-nums;
-      white-space: nowrap;
-    }
-    .aes-sim {
-      font-size: 0.75rem;
-      color: #bbb;
-      text-align: right;
-      font-variant-numeric: tabular-nums;
-    }
+    .aes-row.top-row { background: #fdf0f2; font-weight: 600; }
+    .aes-name { font-size: 0.88rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .bar-track { height: 8px; background: #eee; border-radius: 99px; overflow: hidden; }
+    .bar-fill { height: 100%; border-radius: 99px; background: linear-gradient(90deg, #e8b4b8, #b5838d); transition: width 0.5s ease; }
+    .aes-score { font-size: 0.88rem; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .aes-sim { font-size: 0.75rem; color: #bbb; text-align: right; font-variant-numeric: tabular-nums; }
     .rank-badge {
-      display: inline-block;
-      font-size: 0.72rem;
-      padding: 1px 5px;
-      border-radius: 4px;
-      background: #b5838d;
-      color: #fff;
-      margin-left: 4px;
-      vertical-align: middle;
+      display: inline-block; font-size: 0.72rem; padding: 1px 5px;
+      border-radius: 4px; background: #b5838d; color: #fff;
+      margin-left: 4px; vertical-align: middle;
     }
 
-    /* ── Error ──────────────────────────────────────────────── */
-    #error-msg {
+    /* ── Recommend section ──────────────────────────────────── */
+    .rec-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2rem; margin-bottom: 1.2rem; }
+    @media (max-width: 560px) { .rec-grid { grid-template-columns: 1fr; } }
+    .rec-label { font-size: 0.78rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: #aaa; margin-bottom: 0.5rem; }
+    .rec-base-preview { display: none; margin-top: 0.8rem; text-align: center; }
+    .rec-base-preview img {
+      max-height: 180px; max-width: 100%;
+      border-radius: 8px; object-fit: contain;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    }
+
+    /* Items grid */
+    .items-drop-zone {
+      border: 2px dashed #ccc; border-radius: 12px; padding: 1.2rem;
+      min-height: 80px; transition: border-color 0.2s, background 0.2s;
+    }
+    .items-drop-zone.has-items { border-style: solid; border-color: #e8b4b8; }
+    .items-drop-zone.dragover  { border-color: #b5838d; background: #fdf5f6; }
+    .items-empty { text-align: center; color: #bbb; font-size: 0.85rem; padding: 0.5rem 0; }
+    .items-thumbs { display: flex; flex-wrap: wrap; gap: 0.7rem; }
+    .item-thumb {
+      position: relative; width: 80px;
+    }
+    .item-thumb img {
+      width: 80px; height: 80px; object-fit: cover;
+      border-radius: 8px; box-shadow: 0 1px 6px rgba(0,0,0,0.12);
+      display: block;
+    }
+    .item-thumb .item-num {
+      position: absolute; top: 4px; left: 4px;
+      background: rgba(0,0,0,0.55); color: #fff;
+      font-size: 0.65rem; font-weight: 700;
+      padding: 1px 5px; border-radius: 4px;
+    }
+    .item-thumb .item-del {
+      position: absolute; top: 3px; right: 3px;
+      width: 18px; height: 18px;
+      background: rgba(200,50,50,0.8); color: #fff;
+      border: none; border-radius: 50%; font-size: 0.7rem;
+      line-height: 18px; text-align: center; cursor: pointer;
       display: none;
-      margin-top: 1rem;
-      padding: 0.7rem 1rem;
-      background: #fff0f0;
-      border: 1px solid #fcc;
-      border-radius: 8px;
-      color: #c00;
-      font-size: 0.85rem;
+    }
+    .item-thumb:hover .item-del { display: block; }
+
+    .add-items-btn {
+      margin-top: 0.8rem; padding: 0.45rem 1.1rem;
+      background: none; border: 1.5px solid #b5838d;
+      color: #b5838d; border-radius: 8px; font-size: 0.85rem;
+      font-weight: 600; cursor: pointer; transition: background 0.15s, color 0.15s;
+    }
+    .add-items-btn:hover { background: #b5838d; color: #fff; }
+    #items-file-input { display: none; }
+
+    .rec-actions { display: flex; gap: 0.8rem; align-items: center; margin-top: 1.2rem; flex-wrap: wrap; }
+
+    /* Recommendation results */
+    .rec-results { display: none; margin-top: 1.8rem; }
+    .rec-base-info {
+      display: flex; align-items: center; gap: 1rem;
+      padding: 0.8rem 1rem; background: #fdf0f2;
+      border-radius: 10px; margin-bottom: 1.4rem;
+    }
+    .rec-base-info .bi-label { font-size: 0.75rem; color: #aaa; font-weight: 700; text-transform: uppercase; }
+    .rec-base-info .bi-aes { font-size: 1.1rem; font-weight: 700; color: #b5838d; }
+    .rec-base-info .bi-score { font-size: 0.82rem; color: #888; }
+
+    .items-results { display: flex; flex-direction: column; gap: 0.7rem; }
+    .item-result-row {
+      display: flex; align-items: center; gap: 0.9rem;
+      padding: 0.65rem 0.8rem; border-radius: 10px;
+      border: 1.5px solid transparent; transition: border-color 0.2s, background 0.2s;
+    }
+    .item-result-row.is-recommended {
+      border-color: #b5838d; background: #fdf5f6;
+    }
+    .item-result-row img {
+      width: 56px; height: 56px; object-fit: cover;
+      border-radius: 7px; flex-shrink: 0;
+    }
+    .item-result-info { flex: 1; min-width: 0; }
+    .item-result-name { font-size: 0.82rem; color: #444; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .item-result-aes  { font-size: 0.92rem; font-weight: 600; color: #2b2b2b; margin-top: 0.1rem; }
+    .item-result-score { font-size: 0.78rem; color: #999; margin-top: 0.1rem; }
+    .item-result-badge {
+      padding: 0.3rem 0.7rem; border-radius: 20px;
+      font-size: 0.75rem; font-weight: 700; white-space: nowrap; flex-shrink: 0;
+    }
+    .item-result-badge.match    { background: #b5838d; color: #fff; }
+    .item-result-badge.no-match { background: #eee; color: #aaa; }
+    .item-result-badge.pick     { background: #2b2b2b; color: #fff; }
+
+    /* ── Error ──────────────────────────────────────────────── */
+    .error-msg {
+      display: none; margin-top: 1rem; padding: 0.7rem 1rem;
+      background: #fff0f0; border: 1px solid #fcc;
+      border-radius: 8px; color: #c00; font-size: 0.85rem;
     }
   </style>
 </head>
@@ -300,52 +271,117 @@
 
 <header>
   <h1>Outfit Aesthetic Scorer</h1>
-  <p>Upload a photo &amp; see how it matches different fashion aesthetics</p>
+  <p>Score an outfit's aesthetic — or find which item pairs best with your look</p>
 </header>
 
 <div class="card">
 
-  <!-- Upload -->
-  <div class="upload-zone" id="upload-zone">
-    <input type="file" id="file-input" accept="image/*" />
-    <div class="upload-icon">👗</div>
-    <strong>Drop an outfit photo here</strong>
-    <p>or click to browse &nbsp;·&nbsp; JPG, PNG, WEBP</p>
+  <!-- Tab bar -->
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="score">Score Outfit</button>
+    <button class="tab-btn"        data-tab="recommend">Find Best Match</button>
   </div>
 
-  <!-- Preview -->
-  <div id="preview-wrap">
-    <img id="preview-img" src="" alt="outfit preview" />
-    <button id="remove-btn">remove image</button>
+  <!-- ═══════════════ SCORE TAB ═══════════════ -->
+  <div class="tab-section active" id="score-section">
+
+    <div class="upload-zone" id="upload-zone">
+      <input type="file" id="file-input" accept="image/*" />
+      <div class="upload-icon">👗</div>
+      <strong>Drop an outfit photo here</strong>
+      <p>or click to browse &nbsp;·&nbsp; JPG, PNG, WEBP</p>
+    </div>
+
+    <div class="preview-wrap" id="preview-wrap">
+      <img id="preview-img" src="" alt="outfit preview" />
+      <button class="remove-btn" id="remove-btn">remove image</button>
+    </div>
+
+    <div class="controls">
+      <label for="aesthetic-select">Aesthetic:</label>
+      <select id="aesthetic-select">
+        <option value="">— rank all —</option>
+        {% for a in aesthetics %}
+        <option value="{{ a.key }}">{{ a.label }}</option>
+        {% endfor %}
+      </select>
+      <button class="primary-btn" id="score-btn" disabled>Score</button>
+    </div>
+
+    <div class="spinner" id="spinner">
+      <div class="dot-flashing"><span></span><span></span><span></span></div>
+      Scoring outfit…
+    </div>
+
+    <div class="error-msg" id="error-msg"></div>
+    <div class="results"   id="results"></div>
+
   </div>
 
-  <!-- Controls -->
-  <div class="controls">
-    <label for="aesthetic-select">Aesthetic:</label>
-    <select id="aesthetic-select">
-      <option value="">— rank all —</option>
-      {% for a in aesthetics %}
-      <option value="{{ a.key }}">{{ a.label }}</option>
-      {% endfor %}
-    </select>
-    <button id="score-btn" disabled>Score</button>
+  <!-- ═══════════════ RECOMMEND TAB ═══════════════ -->
+  <div class="tab-section" id="recommend-section">
+
+    <div class="rec-grid">
+      <!-- Base outfit -->
+      <div>
+        <div class="rec-label">Base Outfit</div>
+        <div class="upload-zone compact" id="rec-base-zone">
+          <input type="file" id="rec-base-input" accept="image/*" />
+          <div class="upload-icon">👗</div>
+          <strong style="font-size:.9rem">Upload base outfit</strong>
+          <p>JPG, PNG, WEBP</p>
+        </div>
+        <div class="rec-base-preview" id="rec-base-preview">
+          <img id="rec-base-img" src="" alt="base outfit" />
+          <button class="remove-btn" id="rec-base-remove">remove</button>
+        </div>
+      </div>
+
+      <!-- Items -->
+      <div>
+        <div class="rec-label">Individual Items</div>
+        <div class="items-drop-zone" id="items-drop-zone">
+          <div class="items-empty" id="items-empty">No items added yet</div>
+          <div class="items-thumbs" id="items-thumbs"></div>
+        </div>
+        <input type="file" id="items-file-input" accept="image/*" multiple />
+        <button class="add-items-btn" id="add-items-btn">+ Add Items</button>
+      </div>
+    </div>
+
+    <div class="rec-actions">
+      <button class="primary-btn" id="rec-btn" disabled>Find Best Match</button>
+      <span id="rec-item-count" style="font-size:0.82rem;color:#aaa;"></span>
+    </div>
+
+    <div class="spinner" id="rec-spinner">
+      <div class="dot-flashing"><span></span><span></span><span></span></div>
+      Analyzing outfits…
+    </div>
+
+    <div class="error-msg"  id="rec-error"></div>
+    <div class="rec-results" id="rec-results"></div>
+
   </div>
 
-  <!-- Spinner -->
-  <div id="spinner">
-    <div class="dot-flashing"><span></span><span></span><span></span></div>
-    Scoring outfit…
-  </div>
-
-  <!-- Error -->
-  <div id="error-msg"></div>
-
-  <!-- Results -->
-  <div id="results"></div>
-
-</div>
+</div><!-- /.card -->
 
 <script>
+  // ══════════════════════════════════════════════
+  //  Tab switching
+  // ══════════════════════════════════════════════
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-section').forEach(s => s.classList.remove('active'));
+      btn.classList.add('active');
+      document.getElementById(btn.dataset.tab + '-section').classList.add('active');
+    });
+  });
+
+  // ══════════════════════════════════════════════
+  //  SCORE TAB
+  // ══════════════════════════════════════════════
   const fileInput   = document.getElementById('file-input');
   const uploadZone  = document.getElementById('upload-zone');
   const previewWrap = document.getElementById('preview-wrap');
@@ -359,19 +395,14 @@
 
   let currentFile = null;
 
-  // ── Drag-and-drop ────────────────────────────────────────────
   uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('dragover'); });
   uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragover'));
   uploadZone.addEventListener('drop', e => {
-    e.preventDefault();
-    uploadZone.classList.remove('dragover');
-    const file = e.dataTransfer.files[0];
-    if (file && file.type.startsWith('image/')) setFile(file);
+    e.preventDefault(); uploadZone.classList.remove('dragover');
+    const f = e.dataTransfer.files[0];
+    if (f && f.type.startsWith('image/')) setFile(f);
   });
-
-  fileInput.addEventListener('change', () => {
-    if (fileInput.files[0]) setFile(fileInput.files[0]);
-  });
+  fileInput.addEventListener('change', () => { if (fileInput.files[0]) setFile(fileInput.files[0]); });
 
   function setFile(file) {
     currentFile = file;
@@ -381,49 +412,36 @@
       previewWrap.style.display = 'block';
       uploadZone.style.display  = 'none';
       scoreBtn.disabled = false;
-      clearResults();
+      clearScoreResults();
     };
     reader.readAsDataURL(file);
   }
 
   removeBtn.addEventListener('click', () => {
-    currentFile = null;
-    previewImg.src = '';
-    previewWrap.style.display = 'none';
-    uploadZone.style.display  = '';
-    scoreBtn.disabled = true;
-    fileInput.value = '';
-    clearResults();
+    currentFile = null; previewImg.src = '';
+    previewWrap.style.display = 'none'; uploadZone.style.display = '';
+    scoreBtn.disabled = true; fileInput.value = '';
+    clearScoreResults();
   });
 
-  // ── Score ────────────────────────────────────────────────────
   scoreBtn.addEventListener('click', async () => {
     if (!currentFile) return;
-
-    setLoading(true);
-    clearResults();
-
-    const formData = new FormData();
-    formData.append('image', currentFile);
+    setScoreLoading(true); clearScoreResults();
+    const fd = new FormData();
+    fd.append('image', currentFile);
     const aes = select.value;
-    if (aes) formData.append('aesthetic', aes);
-
+    if (aes) fd.append('aesthetic', aes);
     try {
-      const resp = await fetch('/score', { method: 'POST', body: formData });
+      const resp = await fetch('/score', { method: 'POST', body: fd });
       const data = await resp.json();
       if (!resp.ok || data.error) throw new Error(data.error || 'Server error');
-      renderResults(data);
-    } catch (err) {
-      showError(err.message);
-    } finally {
-      setLoading(false);
-    }
+      renderScoreResults(data);
+    } catch (err) { showScoreError(err.message); }
+    finally { setScoreLoading(false); }
   });
 
-  // ── Render ───────────────────────────────────────────────────
-  function renderResults(data) {
+  function renderScoreResults(data) {
     resultsDiv.style.display = 'block';
-
     if (data.mode === 'single') {
       const r = data.result;
       const pct = (r.score / 10 * 100).toFixed(1);
@@ -447,15 +465,9 @@
         <div class="result-header">Aesthetic ranking</div>
         ${buildAesList(data.all, data.all[0].aesthetic)}`;
     }
-
-    // Animate bars
     requestAnimationFrame(() => {
-      document.querySelectorAll('[data-pct]').forEach(el => {
-        el.style.width = el.dataset.pct + '%';
-      });
-      document.querySelectorAll('[data-bar]').forEach(el => {
-        el.style.width = el.dataset.bar + '%';
-      });
+      document.querySelectorAll('[data-pct]').forEach(el => { el.style.width = el.dataset.pct + '%'; });
+      document.querySelectorAll('[data-bar]').forEach(el => { el.style.width = el.dataset.bar + '%'; });
     });
   }
 
@@ -467,9 +479,7 @@
       return `
         <div class="aes-row ${isTop ? 'top-row' : ''}">
           <div class="aes-name">${r.label_display}${badge}</div>
-          <div class="bar-track">
-            <div class="bar-fill" style="width:0%" data-bar="${pct}"></div>
-          </div>
+          <div class="bar-track"><div class="bar-fill" style="width:0%" data-bar="${pct}"></div></div>
           <div class="aes-score">${r.score.toFixed(1)}<span style="color:#bbb;font-size:.75rem">/10</span></div>
           <div class="aes-sim">sim ${r.similarity.toFixed(4)}</div>
         </div>`;
@@ -477,23 +487,180 @@
     return `<div class="aes-list">${rows}</div>`;
   }
 
-  // ── Helpers ──────────────────────────────────────────────────
-  function setLoading(on) {
-    spinner.style.display   = on ? 'block' : 'none';
-    scoreBtn.disabled       = on;
+  function setScoreLoading(on) { spinner.style.display = on ? 'block' : 'none'; scoreBtn.disabled = on; }
+  function clearScoreResults() {
+    resultsDiv.style.display = 'none'; resultsDiv.innerHTML = '';
+    errorDiv.style.display = 'none';   errorDiv.textContent = '';
+  }
+  function showScoreError(msg) { errorDiv.textContent = '⚠ ' + msg; errorDiv.style.display = 'block'; }
+
+
+  // ══════════════════════════════════════════════
+  //  RECOMMEND TAB
+  // ══════════════════════════════════════════════
+  const recBaseZone    = document.getElementById('rec-base-zone');
+  const recBaseInput   = document.getElementById('rec-base-input');
+  const recBasePreview = document.getElementById('rec-base-preview');
+  const recBaseImg     = document.getElementById('rec-base-img');
+  const recBaseRemove  = document.getElementById('rec-base-remove');
+  const recBtn         = document.getElementById('rec-btn');
+  const recSpinner     = document.getElementById('rec-spinner');
+  const recError       = document.getElementById('rec-error');
+  const recResults     = document.getElementById('rec-results');
+  const recItemCount   = document.getElementById('rec-item-count');
+  const itemsDropZone  = document.getElementById('items-drop-zone');
+  const itemsThumbs    = document.getElementById('items-thumbs');
+  const itemsEmpty     = document.getElementById('items-empty');
+  const addItemsBtn    = document.getElementById('add-items-btn');
+  const itemsFileInput = document.getElementById('items-file-input');
+
+  let recBaseFile = null;
+  let recItems    = [];   // [{file, dataUrl}]
+
+  // Base outfit upload
+  recBaseZone.addEventListener('dragover', e => { e.preventDefault(); recBaseZone.classList.add('dragover'); });
+  recBaseZone.addEventListener('dragleave', () => recBaseZone.classList.remove('dragover'));
+  recBaseZone.addEventListener('drop', e => {
+    e.preventDefault(); recBaseZone.classList.remove('dragover');
+    const f = e.dataTransfer.files[0];
+    if (f && f.type.startsWith('image/')) setRecBase(f);
+  });
+  recBaseInput.addEventListener('change', () => { if (recBaseInput.files[0]) setRecBase(recBaseInput.files[0]); });
+
+  function setRecBase(file) {
+    recBaseFile = file;
+    const reader = new FileReader();
+    reader.onload = e => {
+      recBaseImg.src = e.target.result;
+      recBasePreview.style.display = 'block';
+      recBaseZone.style.display    = 'none';
+      updateRecBtn();
+      clearRecResults();
+    };
+    reader.readAsDataURL(file);
   }
 
-  function clearResults() {
-    resultsDiv.style.display = 'none';
-    resultsDiv.innerHTML     = '';
-    errorDiv.style.display   = 'none';
-    errorDiv.textContent     = '';
+  recBaseRemove.addEventListener('click', () => {
+    recBaseFile = null; recBaseImg.src = '';
+    recBasePreview.style.display = 'none'; recBaseZone.style.display = '';
+    recBaseInput.value = '';
+    updateRecBtn(); clearRecResults();
+  });
+
+  // Items upload
+  addItemsBtn.addEventListener('click', () => itemsFileInput.click());
+  itemsFileInput.addEventListener('change', () => {
+    Array.from(itemsFileInput.files).forEach(addItem);
+    itemsFileInput.value = '';
+  });
+
+  itemsDropZone.addEventListener('dragover', e => { e.preventDefault(); itemsDropZone.classList.add('dragover'); });
+  itemsDropZone.addEventListener('dragleave', () => itemsDropZone.classList.remove('dragover'));
+  itemsDropZone.addEventListener('drop', e => {
+    e.preventDefault(); itemsDropZone.classList.remove('dragover');
+    Array.from(e.dataTransfer.files)
+      .filter(f => f.type.startsWith('image/'))
+      .forEach(addItem);
+  });
+
+  function addItem(file) {
+    const reader = new FileReader();
+    reader.onload = e => {
+      recItems.push({ file, dataUrl: e.target.result });
+      renderItemThumbs();
+      updateRecBtn();
+      clearRecResults();
+    };
+    reader.readAsDataURL(file);
   }
 
-  function showError(msg) {
-    errorDiv.textContent    = '⚠ ' + msg;
-    errorDiv.style.display  = 'block';
+  function removeItem(idx) {
+    recItems.splice(idx, 1);
+    renderItemThumbs();
+    updateRecBtn();
+    clearRecResults();
   }
+
+  function renderItemThumbs() {
+    itemsEmpty.style.display = recItems.length === 0 ? 'block' : 'none';
+    itemsDropZone.classList.toggle('has-items', recItems.length > 0);
+    itemsThumbs.innerHTML = recItems.map((item, i) => `
+      <div class="item-thumb">
+        <img src="${item.dataUrl}" alt="item ${i+1}" />
+        <span class="item-num">${i+1}</span>
+        <button class="item-del" onclick="removeItem(${i})" title="Remove">✕</button>
+      </div>`).join('');
+    const n = recItems.length;
+    recItemCount.textContent = n > 0 ? `${n} item${n > 1 ? 's' : ''} added` : '';
+  }
+
+  function updateRecBtn() {
+    recBtn.disabled = !(recBaseFile && recItems.length > 0);
+  }
+
+  recBtn.addEventListener('click', async () => {
+    if (!recBaseFile || recItems.length === 0) return;
+    setRecLoading(true); clearRecResults();
+
+    const fd = new FormData();
+    fd.append('base', recBaseFile);
+    recItems.forEach(it => fd.append('items', it.file));
+
+    try {
+      const resp = await fetch('/recommend', { method: 'POST', body: fd });
+      const data = await resp.json();
+      if (!resp.ok || data.error) throw new Error(data.error || 'Server error');
+      renderRecResults(data);
+    } catch (err) { showRecError(err.message); }
+    finally { setRecLoading(false); }
+  });
+
+  function renderRecResults(data) {
+    recResults.style.display = 'block';
+
+    const matchNote = data.exact_match
+      ? 'Exact aesthetic match found'
+      : 'No exact match — showing closest aesthetic';
+
+    const itemRows = data.items.map(it => {
+      const isRec  = it.index === data.recommended_index;
+      const badge  = isRec
+        ? '<span class="item-result-badge pick">⭐ Recommended</span>'
+        : it.matches_base
+          ? '<span class="item-result-badge match">✓ Matches</span>'
+          : '<span class="item-result-badge no-match">No match</span>';
+      const thumb  = recItems[it.index] ? `<img src="${recItems[it.index].dataUrl}" alt="${it.name}" />` : '';
+      return `
+        <div class="item-result-row ${isRec ? 'is-recommended' : ''}">
+          ${thumb}
+          <div class="item-result-info">
+            <div class="item-result-name">${it.name}</div>
+            <div class="item-result-aes">${it.top_aesthetic_display}</div>
+            <div class="item-result-score">Score for ${data.base_aesthetic_display}: ${it.base_aesthetic_score.toFixed(1)}/10</div>
+          </div>
+          ${badge}
+        </div>`;
+    }).join('');
+
+    recResults.innerHTML = `
+      <div class="result-header">Recommendation</div>
+      <div class="rec-base-info">
+        <div>
+          <div class="bi-label">Base outfit aesthetic</div>
+          <div class="bi-aes">${data.base_aesthetic_display}</div>
+          <div class="bi-score">${data.base_top_score.toFixed(1)} / 10</div>
+        </div>
+      </div>
+      <div class="result-header" style="margin-bottom:.6rem">${matchNote}</div>
+      <div class="items-results">${itemRows}</div>`;
+  }
+
+  function setRecLoading(on) { recSpinner.style.display = on ? 'block' : 'none'; recBtn.disabled = on; }
+  function clearRecResults() {
+    recResults.style.display = 'none'; recResults.innerHTML = '';
+    recError.style.display   = 'none'; recError.textContent = '';
+  }
+  function showRecError(msg) { recError.textContent = '⚠ ' + msg; recError.style.display = 'block'; }
 </script>
 </body>
 </html>
