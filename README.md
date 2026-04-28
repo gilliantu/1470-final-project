@@ -138,6 +138,12 @@ python test.py --n 50 --output results/eval.csv
 
 ---
 
+## Report
+
+See [`report.pdf`](report.pdf) for the full written report.
+
+---
+
 ## Dataset
 
 [Shop The Look (Kaggle)](https://www.kaggle.com/datasets/pypiahmad/shop-the-look-dataset/data?select=fashion.json) — scene-product pairs from Pinterest. Used to download reference images for training and evaluation. The dataset files (`fashion.json/fashion.json` and `fashion.json/fashion-cat.json`) must be present locally for training; inference on your own photos requires no dataset.
