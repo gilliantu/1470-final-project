@@ -36,7 +36,6 @@ from preprocess import (
     load_records,
     sample_random_scenes,
     download_image,
-    convert_to_url,
 )
 from aesthetics import AESTHETIC_NAMES
 
