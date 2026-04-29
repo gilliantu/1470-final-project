@@ -151,7 +151,7 @@
     .hero-sim { font-size: 0.78rem; color: #bbb; margin-top: 0.5rem; }
     .aes-list { display: flex; flex-direction: column; gap: 0.55rem; }
     .aes-row {
-      display: grid; grid-template-columns: 140px 1fr 60px 90px;
+      display: grid; grid-template-columns: 140px 1fr 60px;
       align-items: center; gap: 0.6rem; padding: 0.45rem 0.5rem;
       border-radius: 8px; transition: background 0.15s;
     }
@@ -161,7 +161,6 @@
     .bar-track { height: 8px; background: #eee; border-radius: 99px; overflow: hidden; }
     .bar-fill { height: 100%; border-radius: 99px; background: linear-gradient(90deg, #e8b4b8, #b5838d); transition: width 0.5s ease; }
     .aes-score { font-size: 0.88rem; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
-    .aes-sim { font-size: 0.75rem; color: #bbb; text-align: right; font-variant-numeric: tabular-nums; }
     .rank-badge {
       display: inline-block; font-size: 0.72rem; padding: 1px 5px;
       border-radius: 4px; background: #b5838d; color: #fff;
@@ -454,7 +453,6 @@
           <div class="hero-bar-wrap">
             <div class="hero-bar-fill" style="width:0%" data-pct="${pct}"></div>
           </div>
-          <div class="hero-sim">cosine similarity: ${r.similarity.toFixed(4)}</div>
         </div>
         <div style="margin-top:1.4rem">
           <div class="result-header">All aesthetics</div>
@@ -481,7 +479,6 @@
           <div class="aes-name">${r.label_display}${badge}</div>
           <div class="bar-track"><div class="bar-fill" style="width:0%" data-bar="${pct}"></div></div>
           <div class="aes-score">${r.score.toFixed(1)}<span style="color:#bbb;font-size:.75rem">/10</span></div>
-          <div class="aes-sim">sim ${r.similarity.toFixed(4)}</div>
         </div>`;
     }).join('');
     return `<div class="aes-list">${rows}</div>`;

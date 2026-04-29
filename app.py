@@ -5,7 +5,7 @@ Run:
     conda activate csci1470
     python app.py
 
-Then open http://localhost:5000
+Then open http://localhost:5001
 """
 
 import base64
@@ -17,21 +17,23 @@ from flask import Flask, jsonify, render_template, request
 from PIL import Image
 
 from aesthetics import AESTHETIC_NAMES
-from model import AestheticScorer, load_prototypes
+from transformer_model import AestheticScorerV3
 
-PROTO_PATH = os.path.join(os.path.dirname(__file__), "data", "prototypes.npz")
+CKPT_PATH = os.path.join(os.path.dirname(__file__), "data", "transformer_v3.pt")
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB upload limit
 
-# Load model + prototypes once at startup
-print("Loading prototypes…")
-if not os.path.exists(PROTO_PATH):
-    print(f"ERROR: {PROTO_PATH} not found. Run `python train.py` first.")
+# Load V3 transformer once at startup
+print("Loading V3 transformer…")
+if not os.path.exists(CKPT_PATH):
+    print(f"ERROR: {CKPT_PATH} not found. Run `python train_transformer.py` first.")
     sys.exit(1)
 
-prototypes = load_prototypes(PROTO_PATH)
-scorer = AestheticScorer()
+scorer = AestheticScorerV3(
+    checkpoint_path=CKPT_PATH,
+    aesthetic_names=list(AESTHETIC_NAMES.keys()),
+)
 print("Ready.")
 
 
@@ -39,7 +41,7 @@ print("Ready.")
 def index():
     aesthetics = [
         {"key": k, "label": AESTHETIC_NAMES.get(k, k)}
-        for k in prototypes
+        for k in AESTHETIC_NAMES
     ]
     return render_template("index.html", aesthetics=aesthetics)
 
@@ -65,13 +67,13 @@ def score():
         request.get_json(silent=True) or {}
     ).get("aesthetic")
 
-    ranked = scorer.rank_aesthetics(image, prototypes)
+    ranked = scorer.rank_aesthetics(image)
 
     # Attach display labels
     for r in ranked:
         r["label_display"] = AESTHETIC_NAMES.get(r["aesthetic"], r["aesthetic"])
 
-    if target and target in prototypes:
+    if target and target in AESTHETIC_NAMES:
         for r in ranked:
             if r["aesthetic"] == target:
                 return jsonify({"mode": "single", "result": r, "all": ranked})
@@ -97,7 +99,7 @@ def recommend():
         return jsonify({"error": "No item images provided."}), 400
 
     # Score base outfit
-    base_ranked = scorer.rank_aesthetics(base_img, prototypes)
+    base_ranked = scorer.rank_aesthetics(base_img)
     for r in base_ranked:
         r["label_display"] = AESTHETIC_NAMES.get(r["aesthetic"], r["aesthetic"])
     base_top_aesthetic = base_ranked[0]["aesthetic"]
@@ -105,7 +107,7 @@ def recommend():
     # Score each item
     items_out = []
     for idx, (name, img) in enumerate(valid_items):
-        ranked = scorer.rank_aesthetics(img, prototypes)
+        ranked = scorer.rank_aesthetics(img)
         for r in ranked:
             r["label_display"] = AESTHETIC_NAMES.get(r["aesthetic"], r["aesthetic"])
         item_top = ranked[0]
